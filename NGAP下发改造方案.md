@@ -212,7 +212,7 @@ env:`QOS_CORE_MODE`、`QOS_CORE_SMF_ENDPOINT`、`QOS_CORE_AMF_ENDPOINT` 覆盖�
 
 | 必填 | 来源 | 现有代码是否有 |
 |---|---|---|
-| SUPI | `Intent.Flow.UEAddress`→AMF 反查 | △ 需 enforcer 内反查 |
+| SUPI | `Intent.Flow.UEAddress`(UE IP)→SMF 解析 / `SEID` | △ 需 enforcer 内解析,详见 §6.1 |
 | pduSessionId | SUPI 解析 / `SEID` 映 SMF | △ 需 enforcer 内解析 |
 | QFI | `Intent.Flow.QFI` | ✅ |
 | 5QI | `Decision.PDBMS`/`ServiceInfo` 派生 | △ enforcer 内派生(不入 model) |
@@ -220,6 +220,40 @@ env:`QOS_CORE_MODE`、`QOS_CORE_SMF_ENDPOINT`、`QOS_CORE_AMF_ENDPOINT` 覆盖�
 | MBR-UL/DL、GBR-UL/DL | `Decision.MBRULKbps/DL`、`Decision.GBRULKbps/DL` | ✅(单位 kbps↔NGAP BitRate 换算) |
 
 gNB-HTTP 路径独有的 `mcs/rb/bler/smooth/burst`/`rnti` **NGAP 不带**,这些只在 gNB-HTTP 线缆格式里,NGAP Enforcer 不用。
+
+### 6.1 寻址 key 分流(RNTI vs UE IP vs SUPI,无需硬转换)
+
+RNTI 和 SUPI 分属不同域,**没有直接映射表**:
+
+| 标识 | 谁分配 | 谁认 | 域 |
+|---|---|---|---|
+| C-RNTI | gNB MAC(RRC 接入时) | **只有 gNB 认** | 空口/gNB 内部 |
+| SUPI | USIM/UDM | AMF/SMF/PCF | 核心网 |
+| UE IP | SMF(PDU session) | SMF、UPF(PDR) | 核心网用户面 |
+| SEID | SMF/UPF(PFCP) | SMF、UPF | N4 |
+
+C-RNTI↔RAN UE NGAP ID 映射**只在 gNB 内部**,不暴露;AMF 只认 SUPI/GUTI/RAN UE NGAP ID,**不认 C-RNTI**。所以**从核心侧查不到 RNTI→SUPI**。
+
+**结论:不要硬转 RNTI→SUPI,每条路径用它自己的寻址 key:**
+
+| 路径 | 寻址 key | key 来源 | 定位方式 |
+|---|---|---|---|
+| gNB-HTTP | **RNTI** | 请求 `rnti` | gNB 内部认 |
+| UPF 自适应 | **UE IP**(或 SEID) | `Intent.Flow.UEAddress`/`SEID` | UPF 按 UE IP 匹配 PDR `UEIPv4`→session(`adaptive_qos.go:1366` `resolveAdaptiveSessionLocked`)。**无需 SUPI** |
+| SMF 外挂 | **UE IP** 或 **SEID** | `Intent.Flow.UEAddress`/`SEID` | SMF 持有 UE IP↔PDU session↔SUPI,解析出 SUPI+pduSessionId |
+| AMF 外挂 | **SUPI** | 经 SMF 解析,或请求带 | AMF 按 SUPI→RAN UE NGAP ID |
+
+NGAP 经 SMF 的转换流程:
+```
+QoS 模块(带 UEAddress=UE IP)
+   ├─► SMF:"按 UE IP 找 PDU session" → 返回 SUPI + pduSessionId
+   │    (SMF 内部:UE IP → PDU session → SUPI,它本来就有这张表)
+   └─► SMF 用 SUPI+pduSessionId 触发 QoS flow modify → N1N2 → AMF → gNB
+```
+
+你模块的 `Intent.Flow.UEAddress`(来自 `masqueapi.SourceAddress`——MASQUE 代理在 UE 数据路径上看得到 UE 源 IP,handler 用 `ClientIP` 兜底)和 `SEID` 已备好,**不需要新增 RNTI→SUPI 转换**。
+
+> 若上游只给 RNTI、不给 UE IP:RNTI 在核心侧**无法解析**(无 gNB 配合查不到)。解法:让 MASQUE 代理在请求里带 `source_address`(`masqueapi` 已有该字段),由 UE IP 作为跨域桥梁。
 
 ---
 
