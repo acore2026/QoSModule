@@ -1,0 +1,1840 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>free6gc adaptive_qos：当前实现与方案A对比</title>
+  <style>
+    :root {
+      --ink: #172027;
+      --muted: #5d6972;
+      --paper: #f7f9f8;
+      --surface: #ffffff;
+      --line: #cbd3d7;
+      --line-strong: #84929a;
+      --current: #c4482d;
+      --current-soft: #fff0eb;
+      --plan: #067a68;
+      --plan-soft: #e9f7f3;
+      --warning: #b87900;
+      --warning-soft: #fff7df;
+      --nav: #10181d;
+      --code: #162127;
+      --code-ink: #dce9e5;
+      --max: 1240px;
+      --radius: 4px;
+      --shadow: 0 10px 30px rgba(24, 37, 44, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+      scroll-padding-top: 78px;
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--paper);
+      font-family: "Noto Sans SC", "Microsoft YaHei", "PingFang SC", sans-serif;
+      line-height: 1.7;
+      letter-spacing: 0;
+    }
+
+    button,
+    a {
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    a {
+      color: inherit;
+    }
+
+    .skip-link {
+      position: fixed;
+      z-index: 100;
+      top: 8px;
+      left: 8px;
+      transform: translateY(-160%);
+      padding: 8px 12px;
+      color: #fff;
+      background: var(--nav);
+      border-radius: var(--radius);
+    }
+
+    .skip-link:focus {
+      transform: translateY(0);
+    }
+
+    .topbar {
+      position: sticky;
+      z-index: 50;
+      top: 0;
+      display: flex;
+      align-items: center;
+      min-height: 62px;
+      color: #f7fbfa;
+      background: var(--nav);
+      border-bottom: 3px solid var(--plan);
+    }
+
+    .topbar-inner {
+      width: min(calc(100% - 32px), var(--max));
+      margin: 0 auto;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      min-width: max-content;
+      gap: 10px;
+      font-family: "IBM Plex Mono", "Cascadia Code", "Noto Sans Mono CJK SC", monospace;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .brand-mark {
+      width: 12px;
+      height: 28px;
+      background: var(--plan);
+      box-shadow: 6px 0 0 var(--current);
+    }
+
+    .nav {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+
+    .nav::-webkit-scrollbar {
+      display: none;
+    }
+
+    .nav a {
+      flex: 0 0 auto;
+      padding: 7px 9px;
+      color: #bdc8cc;
+      text-decoration: none;
+      font-size: 13px;
+      border-bottom: 2px solid transparent;
+    }
+
+    .nav a:hover,
+    .nav a:focus-visible,
+    .nav a.active {
+      color: #fff;
+      border-bottom-color: #fff;
+      outline: none;
+    }
+
+    main {
+      overflow: hidden;
+    }
+
+    .section {
+      padding: 72px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .section:nth-child(even) {
+      background: var(--surface);
+    }
+
+    .container {
+      width: min(calc(100% - 32px), var(--max));
+      margin: 0 auto;
+    }
+
+    .hero {
+      padding: 58px 0 54px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.3fr) minmax(310px, 0.7fr);
+      align-items: end;
+      gap: 64px;
+    }
+
+    .kicker {
+      margin: 0 0 14px;
+      color: var(--plan);
+      font-family: "IBM Plex Mono", "Cascadia Code", monospace;
+      font-size: 13px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+
+    h1,
+    h2,
+    h3 {
+      margin-top: 0;
+      font-family: "Noto Serif SC", "Songti SC", "STSong", serif;
+      letter-spacing: 0;
+    }
+
+    h1 {
+      max-width: 850px;
+      margin-bottom: 22px;
+      font-size: clamp(34px, 5vw, 66px);
+      line-height: 1.12;
+      font-weight: 800;
+    }
+
+    h2 {
+      margin-bottom: 12px;
+      font-size: clamp(28px, 3vw, 42px);
+      line-height: 1.2;
+    }
+
+    h3 {
+      margin-bottom: 10px;
+      font-size: 22px;
+      line-height: 1.3;
+    }
+
+    .lede {
+      max-width: 820px;
+      margin: 0;
+      color: var(--muted);
+      font-size: 18px;
+    }
+
+    .verdict {
+      position: relative;
+      padding: 24px 24px 24px 28px;
+      background: var(--plan-soft);
+      border: 1px solid #8dc8ba;
+      border-left: 6px solid var(--plan);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+
+    .verdict-label {
+      display: block;
+      margin-bottom: 8px;
+      color: var(--plan);
+      font-family: "IBM Plex Mono", "Cascadia Code", monospace;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .verdict strong {
+      display: block;
+      margin-bottom: 8px;
+      font-size: 20px;
+    }
+
+    .verdict p {
+      margin: 0;
+      color: #375b53;
+      font-size: 14px;
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      margin-top: 46px;
+      border-top: 1px solid var(--line);
+      border-left: 1px solid var(--line);
+    }
+
+    .metric {
+      min-height: 118px;
+      padding: 18px;
+      background: #fbfcfc;
+      border-right: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .metric-value {
+      display: block;
+      margin-bottom: 5px;
+      font-family: "IBM Plex Mono", "Cascadia Code", monospace;
+      font-size: 27px;
+      font-weight: 800;
+      line-height: 1.2;
+    }
+
+    .metric-label {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .section-head {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 28px;
+      margin-bottom: 34px;
+    }
+
+    .section-intro {
+      max-width: 760px;
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .legend {
+      display: flex;
+      gap: 18px;
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+    }
+
+    .legend i {
+      width: 13px;
+      height: 13px;
+      border-radius: 2px;
+    }
+
+    .legend-current {
+      background: var(--current);
+    }
+
+    .legend-plan {
+      background: var(--plan);
+    }
+
+    .compare-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 22px;
+    }
+
+    .compare-panel {
+      min-width: 0;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-top-width: 6px;
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+
+    .compare-panel.current {
+      border-top-color: var(--current);
+    }
+
+    .compare-panel.plan {
+      border-top-color: var(--plan);
+    }
+
+    .panel-head {
+      padding: 24px 26px 18px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .panel-tag {
+      display: inline-block;
+      margin-bottom: 10px;
+      font-family: "IBM Plex Mono", "Cascadia Code", monospace;
+      font-size: 11px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+
+    .current .panel-tag {
+      color: var(--current);
+    }
+
+    .plan .panel-tag {
+      color: var(--plan);
+    }
+
+    .panel-head p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .panel-body {
+      padding: 24px 26px 28px;
+    }
+
+    .architecture {
+      display: grid;
+      gap: 12px;
+    }
+
+    .flow-row {
+      display: flex;
+      align-items: stretch;
+      gap: 8px;
+    }
+
+    .flow-box {
+      position: relative;
+      flex: 1 1 0;
+      min-width: 0;
+      min-height: 70px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 10px;
+      text-align: center;
+      background: #f7f9f9;
+      border: 1px solid var(--line);
+      border-radius: 2px;
+      font-size: 12px;
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+
+    .flow-box.external {
+      background: var(--current-soft);
+      border-color: #e6a998;
+    }
+
+    .flow-box.safe {
+      background: var(--plan-soft);
+      border-color: #8dc8ba;
+    }
+
+    .flow-arrow {
+      flex: 0 0 17px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--line-strong);
+      font-size: 19px;
+      font-weight: 700;
+    }
+
+    .branch-label {
+      margin: 5px 0 -3px;
+      color: var(--muted);
+      font-family: "IBM Plex Mono", "Cascadia Code", monospace;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .impact-list {
+      display: grid;
+      gap: 0;
+      margin: 26px 0 0;
+      padding: 0;
+      list-style: none;
+      border-top: 1px solid var(--line);
+    }
+
+    .impact-list li {
+      display: grid;
+      grid-template-columns: 128px minmax(0, 1fr);
+      gap: 14px;
+      padding: 12px 0;
+      border-bottom: 1px solid var(--line);
+      font-size: 13px;
+    }
+
+    .impact-list strong {
+      font-family: "IBM Plex Mono", "Cascadia Code", monospace;
+      font-size: 11px;
+    }
+
+    .impact-list span {
+      color: var(--muted);
+    }
+
+    .segmented {
+      display: inline-flex;
+      padding: 3px;
+      background: #e8edef;
+      border: 1px solid var(--line);
+      border-radius: 5px;
+    }
+
+    .segmented button {
+      min-height: 34px;
+      padding: 6px 13px;
+      color: var(--muted);
+      background: transparent;
+      border: 0;
+      border-radius: 3px;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    .segmented button:hover,
+    .segmented button:focus-visible {
+      color: var(--ink);
+      outline: 2px solid var(--line-strong);
+      outline-offset: -2px;
+    }
+
+    .segmented button.active {
+      color: var(--ink);
+      background: #fff;
+      box-shadow: 0 1px 4px rgba(18, 34, 41, 0.14);
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+
+    table {
+      width: 100%;
+      min-width: 840px;
+      border-collapse: collapse;
+      background: var(--surface);
+      font-size: 14px;
+    }
+
+    th,
+    td {
+      padding: 15px 17px;
+      text-align: left;
+      vertical-align: top;
+      border-bottom: 1px solid var(--line);
+    }
+
+    th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      color: #fff;
+      background: var(--nav);
+      font-size: 12px;
+    }
+
+    th.current-col {
+      background: #753525;
+    }
+
+    th.plan-col {
+      background: #075e52;
+    }
+
+    tbody tr:last-child td {
+      border-bottom: 0;
+    }
+
+    tbody tr:hover td {
+      background: #f5f8f8;
+    }
+
+    td:first-child {
+      width: 18%;
+      font-weight: 800;
+    }
+
+    td.current-col {
+      border-left: 3px solid #f1c0b4;
+    }
+
+    td.plan-col {
+      border-left: 3px solid #acd8cd;
+    }
+
+    .status {
+      display: inline-block;
+      margin-bottom: 5px;
+      padding: 2px 7px;
+      border-radius: 2px;
+      font-family: "IBM Plex Mono", "Cascadia Code", monospace;
+      font-size: 10px;
+      font-weight: 800;
+      line-height: 1.5;
+    }
+
+    .status.high {
+      color: #8d2d1b;
+      background: #ffe2d9;
+    }
+
+    .status.medium {
+      color: #825500;
+      background: #ffefbe;
+    }
+
+    .status.low {
+      color: #075e52;
+      background: #dff3ed;
+    }
+
+    .hidden-col {
+      display: none;
+    }
+
+    .scope-grid {
+      display: grid;
+      grid-template-columns: 0.88fr 1.12fr;
+      gap: 38px;
+      align-items: start;
+    }
+
+    .file-stack {
+      display: grid;
+      gap: 10px;
+    }
+
+    .file-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 18px;
+      align-items: center;
+      min-height: 58px;
+      padding: 12px 14px;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-left: 5px solid var(--line-strong);
+      border-radius: var(--radius);
+    }
+
+    .file-row.current-file {
+      border-left-color: var(--current);
+    }
+
+    .file-row.plan-file {
+      border-left-color: var(--plan);
+    }
+
+    .file-name {
+      font-family: "IBM Plex Mono", "Cascadia Code", monospace;
+      font-size: 12px;
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+
+    .file-change {
+      color: var(--muted);
+      font-family: "IBM Plex Mono", "Cascadia Code", monospace;
+      font-size: 11px;
+      white-space: nowrap;
+    }
+
+    .risk-board {
+      display: grid;
+      gap: 16px;
+    }
+
+    .risk-row {
+      display: grid;
+      grid-template-columns: 150px minmax(0, 1fr) 64px;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .risk-name {
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .risk-track {
+      position: relative;
+      height: 12px;
+      overflow: hidden;
+      background: #e4e9eb;
+      border: 1px solid #d0d7da;
+      border-radius: 2px;
+    }
+
+    .risk-fill {
+      height: 100%;
+    }
+
+    .risk-fill.current {
+      background: var(--current);
+    }
+
+    .risk-fill.plan {
+      background: var(--plan);
+    }
+
+    .risk-score {
+      color: var(--muted);
+      font-family: "IBM Plex Mono", "Cascadia Code", monospace;
+      font-size: 11px;
+      text-align: right;
+    }
+
+    .risk-pair {
+      display: grid;
+      gap: 5px;
+    }
+
+    .risk-mini {
+      display: grid;
+      grid-template-columns: 56px minmax(0, 1fr);
+      gap: 8px;
+      align-items: center;
+    }
+
+    .risk-mini span {
+      font-size: 10px;
+      font-weight: 800;
+    }
+
+    .risk-mini .c {
+      color: var(--current);
+    }
+
+    .risk-mini .p {
+      color: var(--plan);
+    }
+
+    .code-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 22px;
+    }
+
+    .code-panel {
+      min-width: 0;
+      overflow: hidden;
+      background: var(--code);
+      border: 1px solid #33434b;
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+
+    .code-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 12px 16px;
+      color: #b9c9c5;
+      background: #10191e;
+      border-bottom: 1px solid #33434b;
+      font-family: "IBM Plex Mono", "Cascadia Code", monospace;
+      font-size: 11px;
+    }
+
+    pre {
+      margin: 0;
+      padding: 18px;
+      overflow: auto;
+      color: var(--code-ink);
+      font-family: "IBM Plex Mono", "Cascadia Code", monospace;
+      font-size: 12px;
+      line-height: 1.7;
+      tab-size: 2;
+    }
+
+    .code-current {
+      color: #ffad99;
+    }
+
+    .code-plan {
+      color: #7ce2ca;
+    }
+
+    .timeline {
+      position: relative;
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 0;
+      margin-top: 30px;
+    }
+
+    .timeline::before {
+      content: "";
+      position: absolute;
+      top: 20px;
+      right: 8%;
+      left: 8%;
+      height: 2px;
+      background: var(--line-strong);
+    }
+
+    .step {
+      position: relative;
+      padding: 0 12px;
+      text-align: center;
+    }
+
+    .step-index {
+      position: relative;
+      z-index: 1;
+      width: 42px;
+      height: 42px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      background: var(--nav);
+      border: 4px solid var(--paper);
+      border-radius: 50%;
+      font-family: "IBM Plex Mono", "Cascadia Code", monospace;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .step h3 {
+      margin: 14px 0 8px;
+      font-family: "Noto Sans SC", "Microsoft YaHei", sans-serif;
+      font-size: 14px;
+    }
+
+    .step p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    .decision-band {
+      display: grid;
+      grid-template-columns: 0.75fr 1.25fr;
+      gap: 34px;
+      align-items: center;
+      padding: 34px;
+      color: #f4f8f7;
+      background: var(--nav);
+      border-left: 8px solid var(--plan);
+    }
+
+    .decision-band h2 {
+      margin: 0;
+      color: #fff;
+    }
+
+    .decision-band p {
+      margin: 0;
+      color: #bcc9cd;
+    }
+
+    .decision-list {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px 22px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .decision-list li {
+      position: relative;
+      padding-left: 19px;
+      font-size: 13px;
+    }
+
+    .decision-list li::before {
+      content: "";
+      position: absolute;
+      top: 9px;
+      left: 0;
+      width: 9px;
+      height: 9px;
+      background: var(--plan);
+    }
+
+    .references {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .references a {
+      display: block;
+      min-width: 0;
+      padding: 14px 16px;
+      color: var(--ink);
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      text-decoration: none;
+      overflow-wrap: anywhere;
+    }
+
+    .references a:hover,
+    .references a:focus-visible {
+      border-color: var(--plan);
+      box-shadow: 0 0 0 2px rgba(6, 122, 104, 0.14);
+      outline: none;
+    }
+
+    .references strong {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 13px;
+    }
+
+    .references span {
+      color: var(--muted);
+      font-family: "IBM Plex Mono", "Cascadia Code", monospace;
+      font-size: 10px;
+    }
+
+    footer {
+      padding: 30px 0 42px;
+      color: #93a2a8;
+      background: var(--nav);
+      font-size: 12px;
+    }
+
+    footer .container {
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+    }
+
+    .reveal {
+      opacity: 0;
+      transform: translateY(14px);
+      transition: opacity 480ms ease, transform 480ms ease;
+    }
+
+    .reveal.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+
+      .reveal {
+        opacity: 1;
+        transform: none;
+        transition: none;
+      }
+    }
+
+    @media (max-width: 980px) {
+      .hero-grid,
+      .scope-grid,
+      .decision-band {
+        grid-template-columns: 1fr;
+      }
+
+      .hero-grid {
+        align-items: start;
+        gap: 34px;
+      }
+
+      .metrics {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .compare-grid,
+      .code-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .timeline {
+        grid-template-columns: 1fr;
+        gap: 18px;
+      }
+
+      .timeline::before {
+        top: 20px;
+        bottom: 20px;
+        left: 20px;
+        width: 2px;
+        height: auto;
+      }
+
+      .step {
+        display: grid;
+        grid-template-columns: 42px minmax(0, 1fr);
+        gap: 14px;
+        padding: 0;
+        text-align: left;
+      }
+
+      .step-index {
+        grid-row: span 2;
+        border-color: var(--paper);
+      }
+
+      .step h3 {
+        margin: 2px 0 0;
+      }
+
+      .step p {
+        margin-top: -7px;
+      }
+    }
+
+    @media (max-width: 720px) {
+      html {
+        scroll-padding-top: 112px;
+      }
+
+      .topbar-inner {
+        width: 100%;
+        padding: 10px 16px 8px;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 6px;
+      }
+
+      .brand {
+        justify-content: space-between;
+      }
+
+      .nav {
+        padding-bottom: 2px;
+      }
+
+      .hero,
+      .section {
+        padding: 48px 0;
+      }
+
+      .section-head {
+        align-items: stretch;
+        flex-direction: column;
+        gap: 18px;
+      }
+
+      .legend {
+        white-space: normal;
+      }
+
+      h1 {
+        font-size: 36px;
+      }
+
+      .lede {
+        font-size: 16px;
+      }
+
+      .metrics {
+        grid-template-columns: 1fr;
+      }
+
+      .metric {
+        min-height: auto;
+      }
+
+      .flow-row {
+        flex-direction: column;
+      }
+
+      .flow-arrow {
+        min-height: 20px;
+        transform: rotate(90deg);
+      }
+
+      .impact-list li {
+        grid-template-columns: 1fr;
+        gap: 3px;
+      }
+
+      .risk-row {
+        grid-template-columns: 105px minmax(0, 1fr);
+      }
+
+      .risk-score {
+        display: none;
+      }
+
+      .decision-list,
+      .references {
+        grid-template-columns: 1fr;
+      }
+
+      .decision-band {
+        padding: 26px 22px;
+      }
+
+      footer .container {
+        flex-direction: column;
+      }
+    }
+
+    @media print {
+      .topbar,
+      .segmented {
+        display: none;
+      }
+
+      body {
+        background: #fff;
+      }
+
+      .section,
+      .hero {
+        padding: 34px 0;
+        break-inside: avoid;
+      }
+
+      .reveal {
+        opacity: 1;
+        transform: none;
+      }
+
+      .compare-panel,
+      .table-wrap,
+      .code-panel {
+        box-shadow: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到正文</a>
+
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span>QoS / CHANGE REVIEW</span>
+      </div>
+      <nav class="nav" aria-label="页面目录">
+        <a href="#overview">结论</a>
+        <a href="#architecture">架构</a>
+        <a href="#differences">差异</a>
+        <a href="#impact">影响</a>
+        <a href="#code">代码</a>
+        <a href="#migration">迁移</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero" id="overview">
+      <div class="container">
+        <div class="hero-grid">
+          <div>
+            <p class="kicker">free6gc adaptive_qos / implementation comparison</p>
+            <h1>当前实现与方案A，到底差在哪里？</h1>
+            <p class="lede">
+              两种方案都能支持“MASQUE请求 → QoS计算 → RAN下发 → UDP回包”，
+              但当前实现把共享模块和新协议接入了free6gc核心路径；方案A则把新能力限制在一个默认关闭的旁路处理器中。
+            </p>
+          </div>
+          <aside class="verdict" aria-label="核心结论">
+            <span class="verdict-label">RECOMMENDATION</span>
+            <strong>如果目标是快速同步到free6gc代码库，方案A更合适。</strong>
+            <p>
+              它牺牲少量代码复用，换取原算法零改动、数据面零改动、默认行为零变化和更简单的构建部署。
+            </p>
+          </aside>
+        </div>
+
+        <div class="metrics" aria-label="关键数字">
+          <div class="metric">
+            <span class="metric-value">50 / 45</span>
+            <span class="metric-label">当前 adaptive_qos.go 新增 / 删除行数</span>
+          </div>
+          <div class="metric">
+            <span class="metric-value">2</span>
+            <span class="metric-label">当前新增外部模块导入</span>
+          </div>
+          <div class="metric">
+            <span class="metric-value">≈ 12</span>
+            <span class="metric-label">方案A预计修改 adaptive_qos.go 行数</span>
+          </div>
+          <div class="metric">
+            <span class="metric-value">OFF</span>
+            <span class="metric-label">方案A默认功能状态</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="architecture">
+      <div class="container">
+        <div class="section-head reveal">
+          <div>
+            <p class="kicker">01 / Architecture</p>
+            <h2>两套架构的核心差异</h2>
+            <p class="section-intro">
+              当前实现追求“策略只维护一份”；方案A追求“free6gc原路径尽量不动”。
+              差异不在最终功能，而在新能力放在系统的哪一层。
+            </p>
+          </div>
+          <div class="legend" aria-label="图例">
+            <span><i class="legend-current"></i>当前耦合点</span>
+            <span><i class="legend-plan"></i>方案A隔离点</span>
+          </div>
+        </div>
+
+        <div class="compare-grid">
+          <article class="compare-panel current reveal" data-scope="current">
+            <header class="panel-head">
+              <span class="panel-tag">Current implementation</span>
+              <h3>共享模块直接进入free6gc</h3>
+              <p>
+                free6gc直接依赖根目录的 `adaptiveqos` module，旧策略和新协议都经过共享模块。
+              </p>
+            </header>
+            <div class="panel-body">
+              <div class="architecture" aria-label="当前实现架构">
+                <div class="branch-label">新项目请求</div>
+                <div class="flow-row">
+                  <div class="flow-box">reportLoop</div>
+                  <div class="flow-arrow">→</div>
+                  <div class="flow-box external">masqueapi.Decode</div>
+                  <div class="flow-arrow">→</div>
+                  <div class="flow-box external">外部adaptiveqos module</div>
+                  <div class="flow-arrow">→</div>
+                  <div class="flow-box">RAN</div>
+                </div>
+                <div class="branch-label">原free6gc请求</div>
+                <div class="flow-row">
+                  <div class="flow-box">AdaptiveReport</div>
+                  <div class="flow-arrow">→</div>
+                  <div class="flow-box external">外部legacy策略</div>
+                  <div class="flow-arrow">→</div>
+                  <div class="flow-box">QER Override</div>
+                </div>
+                <div class="branch-label">用户面路径</div>
+                <div class="flow-row">
+                  <div class="flow-box">InterceptUplink</div>
+                  <div class="flow-arrow">→</div>
+                  <div class="flow-box external">协议识别 + goroutine</div>
+                  <div class="flow-arrow">→</div>
+                  <div class="flow-box">RAN</div>
+                </div>
+              </div>
+              <ul class="impact-list">
+                <li><strong>优势</strong><span>策略、协议和RAN客户端可以被target与free6gc共同复用。</span></li>
+                <li><strong>代价</strong><span>free6gc构建、旧算法、report路径和uplink路径都知道共享模块。</span></li>
+                <li><strong>适合</strong><span>共享模块已经正式发布，并愿意长期维护跨仓库依赖的场景。</span></li>
+              </ul>
+            </div>
+          </article>
+
+          <article class="compare-panel plan reveal" data-scope="plan">
+            <header class="panel-head">
+              <span class="panel-tag">Plan A</span>
+              <h3>新增能力作为可选旁路</h3>
+              <p>
+                原AdaptiveReport和QER逻辑保持原样，新项目能力放在一个独立新增文件中。
+              </p>
+            </header>
+            <div class="panel-body">
+              <div class="architecture" aria-label="方案A架构">
+                <div class="branch-label">report入口</div>
+                <div class="flow-row">
+                  <div class="flow-box">reportLoop</div>
+                  <div class="flow-arrow">→</div>
+                  <div class="flow-box safe">Enable + 严格匹配</div>
+                  <div class="flow-arrow">→</div>
+                  <div class="flow-box safe">adaptive_qos_ran.go</div>
+                  <div class="flow-arrow">→</div>
+                  <div class="flow-box">RAN</div>
+                </div>
+                <div class="branch-label">原free6gc请求</div>
+                <div class="flow-row">
+                  <div class="flow-box">AdaptiveReport</div>
+                  <div class="flow-arrow">→</div>
+                  <div class="flow-box safe">原策略原代码</div>
+                  <div class="flow-arrow">→</div>
+                  <div class="flow-box">QER Override</div>
+                </div>
+                <div class="branch-label">用户面路径</div>
+                <div class="flow-row">
+                  <div class="flow-box">InterceptUplink</div>
+                  <div class="flow-arrow">→</div>
+                  <div class="flow-box safe">完全不修改</div>
+                  <div class="flow-arrow">→</div>
+                  <div class="flow-box">原处理流程</div>
+                </div>
+              </div>
+              <ul class="impact-list">
+                <li><strong>优势</strong><span>功能默认关闭；原算法、数据面和构建方式不受影响。</span></li>
+                <li><strong>代价</strong><span>RAN策略在free6gc中保留一份小型自包含实现，存在重复代码。</span></li>
+                <li><strong>适合</strong><span>需要快速形成可审查、可回滚、可直接同步到free6gc的patch。</span></li>
+              </ul>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="differences">
+      <div class="container">
+        <div class="section-head reveal">
+          <div>
+            <p class="kicker">02 / Difference matrix</p>
+            <h2>逐项差异矩阵</h2>
+            <p class="section-intro">
+              使用切换器可以只查看某一方案。这里的“影响”指对原free6gc构建、运行路径和维护边界的影响。
+            </p>
+          </div>
+          <div class="segmented" role="group" aria-label="对比视图">
+            <button type="button" class="active" data-view="all" aria-pressed="true">全部</button>
+            <button type="button" data-view="current" aria-pressed="false">当前实现</button>
+            <button type="button" data-view="plan" aria-pressed="false">方案A</button>
+          </div>
+        </div>
+
+        <div class="table-wrap reveal">
+          <table>
+            <thead>
+              <tr>
+                <th>比较项</th>
+                <th class="current-col">当前实现</th>
+                <th class="plan-col">方案A</th>
+                <th>判断</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>核心思路</td>
+                <td class="current-col">将公共模型、策略、MASQUE适配和RAN客户端提取为独立module，free6gc直接调用。</td>
+                <td class="plan-col">free6gc只增加一个默认关闭的RAN QoS旁路，原功能保持本地原样。</td>
+                <td><span class="status medium">取舍</span><br>复用优先 vs 稳定优先</td>
+              </tr>
+              <tr>
+                <td>go.mod</td>
+                <td class="current-col">新增 `github.com/acore2026/adaptive-qos v0.0.0` 和本地 `replace`。</td>
+                <td class="plan-col">不增加外部依赖，只使用free6gc现有依赖和Go标准库。</td>
+                <td><span class="status high">关键差异</span><br>方案A更易同步</td>
+              </tr>
+              <tr>
+                <td>原策略公式</td>
+                <td class="current-col">`derivePredictiveBurstDecision` 和 `rateFromBurst` 改为委托外部legacy包。</td>
+                <td class="plan-col">函数内容、输入、输出和调用关系完全不修改。</td>
+                <td><span class="status high">关键差异</span><br>方案A回归面更小</td>
+              </tr>
+              <tr>
+                <td>reportLoop</td>
+                <td class="current-col">每个报文先进入共享 `masqueapi.Decode`，匹配后同步调用RAN。</td>
+                <td class="plan-col">仅在独立功能开关开启时执行严格匹配；不匹配立即回到原逻辑。</td>
+                <td><span class="status medium">运行影响</span></td>
+              </tr>
+              <tr>
+                <td>InterceptUplink</td>
+                <td class="current-col">新增当前协议识别，并为匹配请求启动异步goroutine。</td>
+                <td class="plan-col">完全不修改。当前流程只走MASQUE report UDP入口。</td>
+                <td><span class="status high">数据面风险</span></td>
+              </tr>
+              <tr>
+                <td>协议识别</td>
+                <td class="current-col">当前实现要求同时存在 `request_id/rnti/qfi/burst_info`，再进入项目QoS候选识别。</td>
+                <td class="plan-col">要求功能开启，并且主字段、UL burst字段存在；DL burst字段成对可选。</td>
+                <td><span class="status medium">误识别风险</span></td>
+              </tr>
+              <tr>
+                <td>功能开关</td>
+                <td class="current-col">只要AdaptiveQoS启用，新协议路径随之启用。</td>
+                <td class="plan-col">增加独立 `projectRanQos.enable`，默认 `false`。</td>
+                <td><span class="status low">方案A更安全</span></td>
+              </tr>
+              <tr>
+                <td>代码复用</td>
+                <td class="current-col">target与free6gc共享同一套Policy、Request Adapter和RAN Client。</td>
+                <td class="plan-col">free6gc新文件包含小型自包含实现，与target存在有限重复。</td>
+                <td><span class="status medium">当前实现更优</span></td>
+              </tr>
+              <tr>
+                <td>单独构建free6gc</td>
+                <td class="current-col">必须保留当前目录层级或先发布adaptive-qos module。</td>
+                <td class="plan-col">free6gc仓库自身即可构建，不依赖QoS工作区。</td>
+                <td><span class="status high">交付差异</span></td>
+              </tr>
+              <tr>
+                <td>回滚方式</td>
+                <td class="current-col">需要恢复go.mod、原算法、report和uplink分支，并删除新增文件。</td>
+                <td class="plan-col">关闭配置即可停用；删除一个旁路调用和新增文件即可完整回滚。</td>
+                <td><span class="status low">方案A更简单</span></td>
+              </tr>
+              <tr>
+                <td>长期演进</td>
+                <td class="current-col">适合模块已发布、有版本治理和多项目共同维护的阶段。</td>
+                <td class="plan-col">适合协议仍可能变化、需要先在free6gc快速验证的阶段。</td>
+                <td><span class="status medium">阶段性选择</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="impact">
+      <div class="container">
+        <div class="section-head reveal">
+          <div>
+            <p class="kicker">03 / Change surface</p>
+            <h2>改动面与风险分布</h2>
+            <p class="section-intro">
+              当前实现改动行数仍然可控，但触碰了原算法和数据面入口；方案A新增代码可能更多，
+              但绝大多数位于新文件中，对原代码的语义影响更小。
+            </p>
+          </div>
+        </div>
+
+        <div class="scope-grid">
+          <div class="file-stack reveal">
+            <div class="file-row current-file">
+              <span class="file-name">free6gc-upf/go.mod</span>
+              <span class="file-change">当前 +3</span>
+            </div>
+            <div class="file-row current-file">
+              <span class="file-name">adaptive_qos.go</span>
+              <span class="file-change">当前 +50 / -45</span>
+            </div>
+            <div class="file-row current-file">
+              <span class="file-name">adaptive_qos_project.go</span>
+              <span class="file-change">当前新增 129</span>
+            </div>
+            <div class="file-row plan-file">
+              <span class="file-name">adaptive_qos.go</span>
+              <span class="file-change">方案A约 +12</span>
+            </div>
+            <div class="file-row plan-file">
+              <span class="file-name">factory/config.go</span>
+              <span class="file-change">方案A约 +15</span>
+            </div>
+            <div class="file-row plan-file">
+              <span class="file-name">adaptive_qos_ran.go</span>
+              <span class="file-change">方案A新增约 200</span>
+            </div>
+          </div>
+
+          <div class="risk-board reveal" aria-label="风险对比">
+            <div class="risk-row">
+              <div class="risk-name">构建耦合</div>
+              <div class="risk-pair">
+                <div class="risk-mini"><span class="c">当前</span><div class="risk-track"><div class="risk-fill current" style="width: 82%"></div></div></div>
+                <div class="risk-mini"><span class="p">方案A</span><div class="risk-track"><div class="risk-fill plan" style="width: 18%"></div></div></div>
+              </div>
+              <div class="risk-score">高 / 低</div>
+            </div>
+            <div class="risk-row">
+              <div class="risk-name">旧策略回归</div>
+              <div class="risk-pair">
+                <div class="risk-mini"><span class="c">当前</span><div class="risk-track"><div class="risk-fill current" style="width: 58%"></div></div></div>
+                <div class="risk-mini"><span class="p">方案A</span><div class="risk-track"><div class="risk-fill plan" style="width: 8%"></div></div></div>
+              </div>
+              <div class="risk-score">中 / 低</div>
+            </div>
+            <div class="risk-row">
+              <div class="risk-name">数据面影响</div>
+              <div class="risk-pair">
+                <div class="risk-mini"><span class="c">当前</span><div class="risk-track"><div class="risk-fill current" style="width: 72%"></div></div></div>
+                <div class="risk-mini"><span class="p">方案A</span><div class="risk-track"><div class="risk-fill plan" style="width: 4%"></div></div></div>
+              </div>
+              <div class="risk-score">中高 / 无</div>
+            </div>
+            <div class="risk-row">
+              <div class="risk-name">协议误识别</div>
+              <div class="risk-pair">
+                <div class="risk-mini"><span class="c">当前</span><div class="risk-track"><div class="risk-fill current" style="width: 62%"></div></div></div>
+                <div class="risk-mini"><span class="p">方案A</span><div class="risk-track"><div class="risk-fill plan" style="width: 22%"></div></div></div>
+              </div>
+              <div class="risk-score">中 / 低</div>
+            </div>
+            <div class="risk-row">
+              <div class="risk-name">代码重复</div>
+              <div class="risk-pair">
+                <div class="risk-mini"><span class="c">当前</span><div class="risk-track"><div class="risk-fill current" style="width: 12%"></div></div></div>
+                <div class="risk-mini"><span class="p">方案A</span><div class="risk-track"><div class="risk-fill plan" style="width: 55%"></div></div></div>
+              </div>
+              <div class="risk-score">低 / 中</div>
+            </div>
+            <div class="risk-row">
+              <div class="risk-name">上游同步难度</div>
+              <div class="risk-pair">
+                <div class="risk-mini"><span class="c">当前</span><div class="risk-track"><div class="risk-fill current" style="width: 78%"></div></div></div>
+                <div class="risk-mini"><span class="p">方案A</span><div class="risk-track"><div class="risk-fill plan" style="width: 25%"></div></div></div>
+              </div>
+              <div class="risk-score">高 / 低</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="code">
+      <div class="container">
+        <div class="section-head reveal">
+          <div>
+            <p class="kicker">04 / Code path</p>
+            <h2>代码层面具体发生了什么</h2>
+            <p class="section-intro">
+              当前实现修改多个既有函数；方案A只在reportLoop加一个受控分支，匹配失败后立即回到原代码。
+            </p>
+          </div>
+        </div>
+
+        <div class="code-grid">
+          <div class="code-panel reveal">
+            <div class="code-head">
+              <span>当前实现 / reportLoop</span>
+              <span class="code-current">每个report先尝试新协议</span>
+            </div>
+            <pre><code>c.counters.reportsReceived.Add(1)
+
+<span class="code-current">if result, handled :=
+    c.processProjectQoSPayload(
+        context.Background(),
+        buf[:n],
+    ); handled {
+    // 统计、回包、continue
+}</span>
+
+// 原AdaptiveReport流程
+var report AdaptiveReport
+json.Unmarshal(buf[:n], &amp;report)</code></pre>
+          </div>
+
+          <div class="code-panel reveal">
+            <div class="code-head">
+              <span>方案A / reportLoop</span>
+              <span class="code-plan">默认关闭 + 严格旁路</span>
+            </div>
+            <pre><code>c.counters.reportsReceived.Add(1)
+
+<span class="code-plan">if c.cfg.ProjectRANQoS != nil &amp;&amp;
+    c.cfg.ProjectRANQoS.Enable {
+    if result, handled :=
+        c.tryHandleProjectRANQoS(
+            context.Background(),
+            buf[:n],
+        ); handled {
+        // 回包、continue
+    }
+}</span>
+
+// 以下原代码逐行保持不变
+var report AdaptiveReport
+json.Unmarshal(buf[:n], &amp;report)</code></pre>
+          </div>
+
+          <div class="code-panel reveal">
+            <div class="code-head">
+              <span>当前实现 / 原策略</span>
+              <span class="code-current">委托外部legacy包</span>
+            </div>
+            <pre><code>func derivePredictiveBurstDecision(...) {
+    <span class="code-current">decision := adaptivelegacy.Generate(
+        adaptivelegacy.Input{...},
+        legacyLimits,
+    )</span>
+    return &amp;adaptiveQoSDecisionView{
+        OverrideMBRUL: decision.OverrideMBRUL,
+        OverrideMBRDL: decision.OverrideMBRDL,
+        // ...
+    }
+}</code></pre>
+          </div>
+
+          <div class="code-panel reveal">
+            <div class="code-head">
+              <span>方案A / 原策略</span>
+              <span class="code-plan">不修改</span>
+            </div>
+            <pre><code>func derivePredictiveBurstDecision(...) {
+    <span class="code-plan">// 保留free6gc原来的window、MBR、
+    // GFBR和授权上限计算代码。</span>
+
+    // 不新增import
+    // 不改变函数签名
+    // 不改变返回字段
+    // 不改变现有测试预期
+}</code></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="container">
+        <div class="section-head reveal">
+          <div>
+            <p class="kicker">05 / Runtime behavior</p>
+            <h2>运行时行为对比</h2>
+            <p class="section-intro">
+              方案A的新路径只有在显式配置后才存在；原有AdaptiveReport始终沿用原处理链。
+            </p>
+          </div>
+        </div>
+
+        <div class="compare-grid">
+          <article class="compare-panel current reveal">
+            <header class="panel-head">
+              <span class="panel-tag">Current request routing</span>
+              <h3>当前实现分流条件</h3>
+            </header>
+            <div class="panel-body">
+              <div class="architecture">
+                <div class="flow-row">
+                  <div class="flow-box">任意JSON</div>
+                  <div class="flow-arrow">→</div>
+                  <div class="flow-box external">出现任一marker?</div>
+                  <div class="flow-arrow">→</div>
+                  <div class="flow-box">共享Decode</div>
+                </div>
+                <div class="flow-row">
+                  <div class="flow-box">匹配</div>
+                  <div class="flow-arrow">→</div>
+                  <div class="flow-box external">同步等待RAN</div>
+                  <div class="flow-arrow">→</div>
+                  <div class="flow-box">UDP响应</div>
+                </div>
+              </div>
+              <ul class="impact-list">
+                <li><strong>开关</strong><span>跟随AdaptiveQoS总开关。</span></li>
+                <li><strong>超时</strong><span>RAN调用默认最长约3秒，期间reportLoop被占用。</span></li>
+                <li><strong>uplink</strong><span>用户面也会识别新协议并启动goroutine。</span></li>
+              </ul>
+            </div>
+          </article>
+
+          <article class="compare-panel plan reveal">
+            <header class="panel-head">
+              <span class="panel-tag">Plan A request routing</span>
+              <h3>方案A分流条件</h3>
+            </header>
+            <div class="panel-body">
+              <div class="architecture">
+                <div class="flow-row">
+                  <div class="flow-box">UDP Report</div>
+                  <div class="flow-arrow">→</div>
+                  <div class="flow-box safe">独立开关开启?</div>
+                  <div class="flow-arrow">→</div>
+                  <div class="flow-box">严格字段匹配</div>
+                </div>
+                <div class="flow-row">
+                  <div class="flow-box">完整匹配</div>
+                  <div class="flow-arrow">→</div>
+                  <div class="flow-box safe">自包含RAN Handler</div>
+                  <div class="flow-arrow">→</div>
+                  <div class="flow-box">UDP响应</div>
+                </div>
+              </div>
+              <ul class="impact-list">
+                <li><strong>开关</strong><span>`projectRanQos.enable` 默认关闭。</span></li>
+                <li><strong>超时</strong><span>使用独立配置，建议验证阶段设置为1秒。</span></li>
+                <li><strong>uplink</strong><span>完全不进入InterceptUplink。</span></li>
+              </ul>
+            </div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="container">
+        <div class="section-head reveal">
+          <div>
+            <p class="kicker">06 / Configuration</p>
+            <h2>配置和部署差异</h2>
+            <p class="section-intro">
+              当前实现依赖工作区相对路径；方案A把全部能力放在free6gc仓库内，通过显式配置启用。
+            </p>
+          </div>
+        </div>
+
+        <div class="code-grid">
+          <div class="code-panel reveal">
+            <div class="code-head">
+              <span>当前实现 / go.mod</span>
+              <span class="code-current">依赖目录结构</span>
+            </div>
+            <pre><code>require (
+  <span class="code-current">github.com/acore2026/adaptive-qos v0.0.0</span>
+)
+
+<span class="code-current">replace github.com/acore2026/adaptive-qos
+  =&gt; ../../../adaptiveqos</span>
+
+# 单独复制free6gc-upf后，
+# 相对路径不存在则无法构建。</code></pre>
+          </div>
+
+          <div class="code-panel reveal">
+            <div class="code-head">
+              <span>方案A / upfcfg.yaml</span>
+              <span class="code-plan">默认关闭</span>
+            </div>
+            <pre><code>adaptiveQos:
+  enable: true
+
+  <span class="code-plan">projectRanQos:
+    enable: false
+    endpoint: http://127.0.0.1:8080/api/v1/qos/update
+    timeout: 1s
+    transitDelayRatio: 0.8</span>
+
+# 不修改go.mod
+# free6gc仓库可独立构建</code></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="migration">
+      <div class="container">
+        <div class="section-head reveal">
+          <div>
+            <p class="kicker">07 / Migration path</p>
+            <h2>从当前实现迁移到方案A</h2>
+            <p class="section-intro">
+              迁移目标不是删除当前独立target或共享模块，而是让ref/free6gc恢复最小侵入。
+              `adaptiveqos` 仍可继续服务独立target和其他项目。
+            </p>
+          </div>
+        </div>
+
+        <div class="timeline reveal">
+          <div class="step">
+            <span class="step-index">01</span>
+            <h3>恢复原策略</h3>
+            <p>将derivePredictiveBurstDecision和rateFromBurst恢复为free6gc原实现。</p>
+          </div>
+          <div class="step">
+            <span class="step-index">02</span>
+            <h3>移除热路径分支</h3>
+            <p>删除InterceptUplink中的新协议识别和异步goroutine。</p>
+          </div>
+          <div class="step">
+            <span class="step-index">03</span>
+            <h3>解除构建耦合</h3>
+            <p>从go.mod删除adaptive-qos require与本地replace。</p>
+          </div>
+          <div class="step">
+            <span class="step-index">04</span>
+            <h3>加入受控旁路</h3>
+            <p>reportLoop仅增加默认关闭、严格匹配的tryHandle调用。</p>
+          </div>
+          <div class="step">
+            <span class="step-index">05</span>
+            <h3>新增自包含文件</h3>
+            <p>将请求解析、公式、裁剪和RAN HTTP集中到adaptive_qos_ran.go。</p>
+          </div>
+        </div>
+
+        <div class="decision-band reveal" style="margin-top: 52px;">
+          <div>
+            <p class="kicker" style="color:#7ce2ca;">FINAL DECISION</p>
+            <h2>方案A是验证期的更优边界</h2>
+          </div>
+          <ul class="decision-list">
+            <li>可以直接形成free6gc仓库内的独立patch</li>
+            <li>默认关闭，不改变现有部署行为</li>
+            <li>原AdaptiveReport、Session和QER代码不动</li>
+            <li>不在UPF用户面数据路径加入控制逻辑</li>
+            <li>不依赖外部目录和本地replace</li>
+            <li>后续模块正式发布后仍可再次收敛重复代码</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="container">
+        <div class="section-head reveal">
+          <div>
+            <p class="kicker">08 / Source references</p>
+            <h2>相关代码与文档</h2>
+          </div>
+        </div>
+        <div class="references reveal">
+          <a href="ref/free6gc/free6gc-upf/internal/forwarder/userspace/adaptive_qos.go">
+            <strong>当前 adaptive_qos.go</strong>
+            <span>ref/free6gc/free6gc-upf/internal/forwarder/userspace/adaptive_qos.go</span>
+          </a>
+          <a href="ref/free6gc/free6gc-upf/internal/forwarder/userspace/adaptive_qos_project.go">
+            <strong>当前项目兼容适配器</strong>
+            <span>ref/free6gc/free6gc-upf/internal/forwarder/userspace/adaptive_qos_project.go</span>
+          </a>
+          <a href="adaptiveqos/policy.go">
+            <strong>当前共享Burst Policy</strong>
+            <span>adaptiveqos/policy.go</span>
+          </a>
+          <a href="target/target/qos_handler.go">
+            <strong>独立Target QoS Handler</strong>
+            <span>target/target/qos_handler.go</span>
+          </a>
+          <a href="QoS项目结构与实现详解.md">
+            <strong>项目结构与实现详解</strong>
+            <span>QoS项目结构与实现详解.md</span>
+          </a>
+          <a href="随路Qos设计文档.md">
+            <strong>随路QoS设计文档</strong>
+            <span>随路Qos设计文档.md</span>
+          </a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="container">
+      <span>QoS architecture review · current implementation vs plan A</span>
+      <span>生成于 2026-07-31</span>
+    </div>
+  </footer>
+
+  <script>
+    const viewButtons = document.querySelectorAll("[data-view]");
+    const currentColumns = document.querySelectorAll(".current-col");
+    const planColumns = document.querySelectorAll(".plan-col");
+
+    function setView(view) {
+      currentColumns.forEach((cell) => {
+        cell.classList.toggle("hidden-col", view === "plan");
+      });
+      planColumns.forEach((cell) => {
+        cell.classList.toggle("hidden-col", view === "current");
+      });
+      viewButtons.forEach((button) => {
+        const active = button.dataset.view === view;
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-pressed", String(active));
+      });
+    }
+
+    viewButtons.forEach((button) => {
+      button.addEventListener("click", () => setView(button.dataset.view));
+    });
+
+    const reveals = document.querySelectorAll(".reveal");
+    if ("IntersectionObserver" in window) {
+      const observer = new IntersectionObserver((entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            entry.target.classList.add("visible");
+            observer.unobserve(entry.target);
+          }
+        });
+      }, { threshold: 0.08 });
+      reveals.forEach((element) => observer.observe(element));
+    } else {
+      reveals.forEach((element) => element.classList.add("visible"));
+    }
+
+    const navLinks = [...document.querySelectorAll(".nav a")];
+    const sections = navLinks
+      .map((link) => document.querySelector(link.getAttribute("href")))
+      .filter(Boolean);
+
+    const navObserver = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting) return;
+        navLinks.forEach((link) => {
+          link.classList.toggle(
+            "active",
+            link.getAttribute("href") === "#" + entry.target.id
+          );
+        });
+      });
+    }, { rootMargin: "-25% 0px -65% 0px" });
+
+    sections.forEach((section) => navObserver.observe(section));
+  </script>
+</body>
+</html>

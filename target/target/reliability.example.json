@@ -1,0 +1,7 @@
+{
+  "ttl": "2m",
+  "max_entries": 10000,
+  "max_payload": 65536,
+  "max_retries": 3,
+  "timeout": "1s"
+}

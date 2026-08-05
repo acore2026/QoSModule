@@ -1,0 +1,137 @@
+package target
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"time"
+
+	adaptiveqos "github.com/acore2026/adaptive-qos"
+	"github.com/acore2026/adaptive-qos/masqueapi"
+	"github.com/acore2026/adaptive-qos/ranapi"
+)
+
+type QoSConfig struct {
+	RANEndpoint string
+	RANTimeout  time.Duration
+	Policy      adaptiveqos.BurstPolicyConfig
+	Limits      adaptiveqos.Limits
+	RANDefaults ranapi.RequestDefaults
+	HTTPClient  *http.Client
+	Logger      *log.Logger
+}
+
+type QoSHandler struct {
+	processor *adaptiveqos.Processor
+	logger    *log.Logger
+}
+
+func NewQoSHandler(cfg QoSConfig) (*QoSHandler, error) {
+	if cfg.RANEndpoint == "" {
+		return nil, errors.New("RAN endpoint is required")
+	}
+	if cfg.Limits == (adaptiveqos.Limits{}) {
+		cfg.Limits = adaptiveqos.DefaultRANLimits()
+	}
+	if cfg.Policy == (adaptiveqos.BurstPolicyConfig{}) {
+		cfg.Policy = adaptiveqos.DefaultBurstPolicyConfig()
+	}
+	ranClient := ranapi.NewClient(cfg.RANEndpoint, cfg.RANTimeout)
+	if cfg.HTTPClient != nil {
+		ranClient.HTTPClient = cfg.HTTPClient
+	}
+	if cfg.RANDefaults != (ranapi.RequestDefaults{}) {
+		ranClient.Defaults = cfg.RANDefaults
+	}
+	return &QoSHandler{
+		processor: &adaptiveqos.Processor{
+			Policy:         adaptiveqos.NewBurstPolicy(cfg.Policy),
+			LimitsProvider: adaptiveqos.StaticLimits{Value: cfg.Limits},
+			Enforcer:       ranClient,
+		},
+		logger: cfg.Logger,
+	}, nil
+}
+
+func (h *QoSHandler) Handle(ctx context.Context, message Message) ([]byte, error) {
+	request, recognized, err := masqueapi.Decode(message.Payload, message.ClientIP)
+	if !recognized {
+		h.logf("qos request unrecognized client_ip=%s bytes=%d", message.ClientIP, len(message.Payload))
+		return masqueapi.ErrorFeedback("", "INVALID_PARAM", errors.New("unsupported QoS request format")), nil
+	}
+	if err != nil {
+		h.logf("qos request rejected request_id=%s client_ip=%s error_code=INVALID_PARAM error=%v", request.RequestID, message.ClientIP, err)
+		return masqueapi.ErrorFeedback(request.RequestID, "INVALID_PARAM", err), nil
+	}
+	if h == nil || h.processor == nil {
+		return masqueapi.ErrorFeedback(request.RequestID, "INTERNAL_ERROR", errors.New("QoS processor is not configured")), nil
+	}
+
+	intent := request.Intent()
+	h.logf(
+		"qos request accepted request_id=%s rnti=%d qfi=%d client_ip=%s ul_burst_size=%d ul_burst_duration=%d dl_burst_size=%d dl_burst_duration=%d e2e_delay=%d ul_transit_delay=%d dl_transit_delay=%d",
+		intent.RequestID,
+		intent.Flow.RNTI,
+		intent.Flow.QFI,
+		message.ClientIP,
+		intent.ULBurst.SizeKB,
+		intent.ULBurst.DurationMS,
+		intent.DLBurst.SizeKB,
+		intent.DLBurst.DurationMS,
+		intent.E2EDelayMS,
+		intent.ULTransitDelayMS,
+		intent.DLTransitDelayMS,
+	)
+	outcome, err := h.processor.Process(ctx, intent)
+	if err != nil {
+		code := "INTERNAL_ERROR"
+		switch {
+		case errors.Is(err, adaptiveqos.ErrInvalidIntent):
+			code = "INVALID_PARAM"
+		case errors.Is(err, adaptiveqos.ErrLimitsUnavailable):
+			code = "LIMITS_UNAVAILABLE"
+		case errors.Is(err, adaptiveqos.ErrEnforcementFailed):
+			code = "RAN_UNAVAILABLE"
+		}
+		h.logf("qos request failed request_id=%s error_code=%s error=%v", request.RequestID, code, err)
+		return masqueapi.ErrorFeedback(request.RequestID, code, err), nil
+	}
+	h.logf(
+		"qos ran apply completed request_id=%s status=%s error_code=%s http_status=%d mbr_ul=%d mbr_dl=%d gbr_ul=%d gbr_dl=%d pdb=%d priority=%d target_mbr_ul=%d target_mbr_dl=%d target_gbr_ul=%d target_gbr_dl=%d target_pdb=%d response_bytes=%d",
+		request.RequestID,
+		outcome.Apply.Status,
+		outcome.Apply.ErrorCode,
+		outcome.Apply.HTTPStatus,
+		outcome.Decision.MBRULKbps,
+		outcome.Decision.MBRDLKbps,
+		outcome.Decision.GBRULKbps,
+		outcome.Decision.GBRDLKbps,
+		outcome.Decision.PDBMS,
+		outcome.Decision.Priority,
+		outcome.Decision.Calculation.Target.MBRULKbps,
+		outcome.Decision.Calculation.Target.MBRDLKbps,
+		outcome.Decision.Calculation.Target.GBRULKbps,
+		outcome.Decision.Calculation.Target.GBRDLKbps,
+		outcome.Decision.Calculation.Target.PDBMS,
+		len(outcome.Apply.RawResponse),
+	)
+	if len(outcome.Apply.RawResponse) > 0 {
+		return outcome.Apply.RawResponse, nil
+	}
+
+	h.logf("qos ran apply returned empty payload request_id=%s status=%s", request.RequestID, outcome.Apply.Status)
+	return masqueapi.ErrorFeedback(
+		request.RequestID,
+		"EMPTY_RAN_RESPONSE",
+		fmt.Errorf("RAN returned status %s without a response payload", outcome.Apply.Status),
+	), nil
+}
+
+func (h *QoSHandler) logf(format string, args ...any) {
+	if h == nil || h.logger == nil {
+		return
+	}
+	h.logger.Printf(format, args...)
+}

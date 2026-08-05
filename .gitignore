@@ -1,0 +1,22 @@
+# Exclude the embedded free6GC reference checkout from this standalone QoSModule repo.
+ref/free6gc/
+
+# Local browser/test tooling state.
+.playwright/
+.playwright-cli/
+
+# Common build and test artifacts.
+bin/
+dist/
+build/
+coverage/
+*.test
+*.out
+*.log
+*.tmp
+
+# OS/editor noise.
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
