@@ -248,6 +248,39 @@ go run ./cmd/mockran \
 go run ./cmd/mockran -delay 5s
 ```
 
+Windows 笔记本一键启动，在仓库根目录执行：
+
+```powershell
+.\scripts\start-windows-mock-test.ps1
+```
+
+也可以双击仓库中的：
+
+```text
+scripts\start-windows-mock-test.bat
+```
+
+默认会打开两个 PowerShell 窗口：
+
+```text
+Mock RAN:  http://127.0.0.1:18081/api/v1/qos/update
+Target:    UDP 0.0.0.0:7400
+```
+
+如果 MASQUE Proxy 也在同一台 Windows 笔记本上，target 配置为：
+
+```text
+127.0.0.1:7400
+```
+
+如果 MASQUE Proxy 在其他机器上，target 配置为 Windows 笔记本的局域网地址：
+
+```text
+<Windows-LAN-IP>:7400
+```
+
+此时需要在 Windows 防火墙中允许入站 UDP 7400。
+
 Echo 模式仅用于链路测试：
 
 ```bash

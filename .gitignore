@@ -4,6 +4,7 @@ ref/free6gc/
 # Local browser/test tooling state.
 .playwright/
 .playwright-cli/
+.run/
 
 # Common build and test artifacts.
 bin/
