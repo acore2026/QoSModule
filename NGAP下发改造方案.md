@@ -10,7 +10,7 @@
 | 基站类型 | 是否支持 `POST /api/v1/qos/update` | 下发路径 | 模块状态 |
 |---|---|---|---|
 | 其他基站(软件/开放 gNB) | ✅ 支持 | **gNB-HTTP 直连**(`ranapi.Client`) | 已有,原样保留 |
-| 当前基站(封闭厂商 BBU) | ❌ 不支持 | **NGAP 经核心网**(`smfenforcer` 新增) | 待实现 |
+| 当前基站(封闭厂商 BBU) | ❌ 不支持 | **NGAP 经核心网**(`afenforcer` 新增,扮 AF→PCF) | 待实现 |
 
 切换由配置 `mode`(`ran`/`ngap`/`auto`)决定,程序内用 `RouterEnforcer` 分发,见 §5。
 
@@ -194,19 +194,21 @@ env:`QOS_CORE_MODE`、`QOS_CORE_SMF_ENDPOINT`、`QOS_CORE_AMF_ENDPOINT` 覆盖�
 
 ---
 
-## 6. NGAP 路径方案选择(SMF 外挂,推荐)
+## 6. NGAP 路径方案选择(PCF/AF 外挂,已定)
 
-经 §2 确认当前基站只能走 NGAP,NGAP 又分 AMF/SMF/PCF-AF 三种外挂:
+经 §2 确认当前基站只能走 NGAP。NGAP 经核心网有三种外挂,对比后**选定 PCF/AF 外挂**(方案 C):
 
-| 维度 | A. AMF 外挂 | **B. SMF 外挂(推荐)** | C. PCF/AF 外挂 |
+| 维度 | A. AMF 外挂 | B. SMF 外挂 | **C. PCF/AF 外挂(已选)** |
 |---|---|---|---|
 | 路径 | QoS模块→AMF→gNB(2 段) | QoS模块→SMF→AMF→gNB(3 段) | QoS模块(AF)→PCF→SMF→AMF→gNB(4 段) |
 | 改 NF | AMF(已自建) | SMF(需重建) | **0 改动**(stock PCF 原生) |
-| 端到端 | ⚠️ 仅 gNB DRB,UPF/UE 不配 → QoS 不生效 | ✅ UPF+gNB+UE 全配 | ✅ 全链 |
+| 端到端 | ⚠️ 仅 gNB DRB,UPF/UE 不配 → 不生效 | ✅ 全配 | ✅ 全链 |
 | 标准 | 非标准 | 标准 | 标准(AF 驱动) |
 
-> **不推荐 AMF 外挂**:只配 gNB,UPF/UE 不配,新 QoS flow 在空口建了但流量进不去。**真 QoS 必须走 SMF 或 PCF/AF**。
-> 推荐短期 **SMF 外挂**(端到端、补字段少),长期 **PCF/AF 外挂**(免 NF 重建)。
+- **不选 AMF**:只配 gNB,UPF/UE 不配,突发保障不生效
+- **不选 SMF**:端到端好且 SMF 内查 UE IP(免静态表),但需重建 SMF 镜像;源码在 `base/free5gc/NFs/smf`、Dockerfile 在 `nf_smf/Dockerfile.ac`,仍是核心网改动
+- **选 PCF/AF**:0 核心网改动,改动全在 QoS 模块(唯一要改的仓库 `acore2026/QoSModule`,已同步 + SSH 可推)。代价:AF SBI 比 SMF HTTP 复杂、需静态 UE IP→SUPI 表、需 SDF
+- 远端 `free5GC动态QoS改造方案总结.md` 推荐短期 SMF、长期 PCF/AF;本次经修改量对比(§6.2)后选 PCF/AF,因 0 NF 改动 + QoS 模块仓库就绪可推
 
 ### NGAP Enforcer 最小必填字段(基于实际代码)
 
@@ -243,17 +245,43 @@ C-RNTI↔RAN UE NGAP ID 映射**只在 gNB 内部**,不暴露;AMF 只认 SUPI/GU
 | SMF 外挂 | **UE IP** 或 **SEID** | `Intent.Flow.UEAddress`/`SEID` | SMF 持有 UE IP↔PDU session↔SUPI,解析出 SUPI+pduSessionId |
 | AMF 外挂 | **SUPI** | 经 SMF 解析,或请求带 | AMF 按 SUPI→RAN UE NGAP ID |
 
-NGAP 经 SMF 的转换流程:
+PCF/AF 经静态表的转换流程:
 ```
 QoS 模块(带 UEAddress=UE IP)
-   ├─► SMF:"按 UE IP 找 PDU session" → 返回 SUPI + pduSessionId
-   │    (SMF 内部:UE IP → PDU session → SUPI,它本来就有这张表)
-   └─► SMF 用 SUPI+pduSessionId 触发 QoS flow modify → N1N2 → AMF → gNB
+   ├─► 静态表:UE IP → SUPI(配置在 QoS 模块)
+   ├─► 组装 AF AppSession:SUPI + DNN/slice(配置)+ SDF(masqueapi.PacketFilter)+ 5QI=2 + MBR/GBR(Decision)+ ARP(preemptCap=1)
+   └─► PCF POST /npcf-policyauthorization/v1/app-sessions → PCF 建 PCC rule → 通知 SMF → N1N2 → AMF → gNB
 ```
 
-你模块的 `Intent.Flow.UEAddress`(来自 `masqueapi.SourceAddress`——MASQUE 代理在 UE 数据路径上看得到 UE 源 IP,handler 用 `ClientIP` 兜底)和 `SEID` 已备好,**不需要新增 RNTI→SUPI 转换**。
+你模块的 `Intent.Flow.UEAddress`(来自 `masqueapi.SourceAddress`——MASQUE 代理在 UE 数据路径上看得到 UE 源 IP,handler 用 `ClientIP` 兜底)和 `masqueapi.PacketFilter`(SDF)已备好,SUPI 由静态表查,**不需要新增 RNTI→SUPI 硬转换**。
 
 > 若上游只给 RNTI、不给 UE IP:RNTI 在核心侧**无法解析**(无 gNB 配合查不到)。解法:让 MASQUE 代理在请求里带 `source_address`(`masqueapi` 已有该字段),由 UE IP 作为跨域桥梁。
+
+### 6.2 修改量对比(SMF vs PCF/AF,源码实证)
+
+| 维度 | B. SMF 外挂 | **C. PCF/AF 外挂(已选)** |
+|---|---|---|
+| 核心网改动 | SMF 加端点(`api_oam.go` 加路由 + `GetSMContextByPDUAddress`(`sm_context.go` 加 ~20 行,`smContextPool` `:26` Range 匹配 `PDUAddress` `:137`)+ `HandleOAMQoSUpdate` ~150-250 行,接既有 `applySmPolicyDecision`/PFCP/N1N2)+ 重建 SMF 镜像 | **0** |
+| QoS 模块改动 | `smfenforcer` ~150 行(简单 HTTP/JSON) | `afenforcer` ~300-400 行(AF SBI + 静态表 + SDF + app-session 生命周期) |
+| UE IP→SUPI | SMF 内查(字段已有) | 静态表(QoS 模块配) |
+| SDF | 不强需(按 QFI/session) | 必需(`masqueapi.PacketFilter`) |
+| 总修改量 | ~500 行(SMF+模块) | ~500 行(全在模块) |
+| 复杂度分布 | 分散,每块简单 | 集中在 QoS 模块(AF SBI 重) |
+
+两方案总量相近;选 PCF/AF 因 **0 NF 改动 + QoS 模块仓库就绪可推**。SMF 方案作为备选(若后续接受重建 SMF,可换用以省静态表)。
+
+### 6.3 仓库同步与推送能力(方案 C)
+
+方案 C 只改 QoS 模块,核心网 0 改动。各仓库状态:
+
+| 仓库 | 远端 | 同步 | 可推 | 方案C改? |
+|---|---|---|---|---|
+| **QoSModule**(唯一改) | `acore2026/QoSModule`(SSH) | 0/0 干净 | ✅ SSH | ✅ |
+| PCF 源(`base/free5gc/NFs/pcf`) | `acore2026/free5gc`(HTTPS) | 0/0 | — | ❌ 不改不重建 |
+| AMF(`nf_amf/amf`) | `acore2026/amf`(SSH) | 0/0 干净 | ✅ | ❌ |
+| free5gc-compose(部署) | `acore2026/free5gc-compose`(SSH) | 0/0 | ✅ | ❌(仅切镜像标签时改 compose) |
+
+PCF 容器 stock `free5gc/pcf:v4.2.1`,不改不重建。改动可全部推回 `acore2026/QoSModule`。
 
 ---
 
@@ -262,21 +290,24 @@ QoS 模块(带 UEAddress=UE IP)
 | 能力 | 现状 | 要补 |
 |---|---|---|
 | gNB-HTTP 下发(`ranapi.Client`) | ✅ 已有 | 无,原样保留 |
-| NGAP 下发 | ❌ 没有 | 新增 `smfenforcer`(或 `afenforcer`) |
+| NGAP 下发(PCF/AF) | ❌ 没有 | 新增 `afenforcer`(AF→PCF `Npcf_PolicyAuthorization`) |
 | 按基站切换(双模) | ❌ `QoSHandler` 只绑一个 enforcer | 新增 `RouterEnforcer`,装配进 `qos_handler.go` |
 | `mode` 配置 | ❌ | 加 `core.mode`(flag/env/file) |
+| UE IP→SUPI | ❌ | 静态表配置(默认 5QI=2、ARP preemptCap=1) |
+| SDF 透传 | △ `masqueapi.PacketFilter` 有,`Intent` 未带 | `Intent` 透传 `PacketFilter`(给 AF 用) |
+| 突发 end 拆 flow | ❌ | `afenforcer` 按 burst duration 调度 terminate app-session |
 
-改动范围:**只动 QoSModule,不改核心网代码**(除非选 SMF 外挂需重建 SMF;选 PCF/AF 则 0 NF 改动)。
+改动范围:**只动 QoSModule,核心网 0 改动**(PCF stock 不碰)。
 
 ---
 
-## 8. 落地顺序
+## 8. 落地顺序(对齐远端 `free5GC动态QoS改造方案总结.md` 分阶段)
 
-1. 实现 `smfenforcer`(NGAP Enforcer):5QI/SUPI/pduSession 解析全在本包内,调 SMF(或 PCF PolicyAuthorization)
-2. 实现 `RouterEnforcer`:`ran`/`ngap`/`auto` 分发
-3. `qos_handler.go` 装配 `RouterEnforcer`(替换单一 `ranClient`)
-4. 加 `core.mode` 配置(flag/env/file)
-5. 当前基站配 `ngap`,其他基站配 `ran`,跑通双模
+1. **阶段1 MASQUE 联调(Mock RAN)**——已完成(`cmd/mockran`,`71ec1ab`):验证收包/`CLIENT-IP` 解析/字段校验/动态 QoS 计算/RAN 请求体构造/重传缓存
+2. **阶段2 AF Enforcer + Mock PCF 联调**:实现 `afenforcer`,先用 mock PCF 验证 AppSession 请求体(SUPI 静态表查、5QI=2、MBR/GBR、ARP preemptCap=1、SDF 转换)
+3. **阶段3 真 PCF 联调**:指向 `pcf.free5gc.org:8000`,PCF→SMF→AMF→gNB 全链,验证突发 GBR flow 生效
+4. **阶段4 真实 RAN 联调**:验证 gNB 收到 `PDUSessionResourceModify`、QoS flow 生效、视频码率/时延/丢包/MOS 变化、失败路径可定位
+5. 全程实现 `RouterEnforcer` 双模:`mode=ngap` 走 AF、`mode=ran` 走 gNB-HTTP、`mode=auto` 优先 ran 失败回退 ngap
 
 gNB-HTTP 路径(`ranapi.Client`/`ranapi.Request`/`mask`)全程不改,保证其他基站继续可用。
 
