@@ -9,8 +9,10 @@ import (
 	"time"
 
 	adaptiveqos "github.com/acore2026/adaptive-qos"
+	"github.com/acore2026/adaptive-qos/afenforcer"
 	"github.com/acore2026/adaptive-qos/masqueapi"
 	"github.com/acore2026/adaptive-qos/ranapi"
+	"github.com/acore2026/adaptive-qos/routerenforcer"
 )
 
 type QoSConfig struct {
@@ -21,6 +23,11 @@ type QoSConfig struct {
 	RANDefaults ranapi.RequestDefaults
 	HTTPClient  *http.Client
 	Logger      *log.Logger
+
+	// CoreMode routes enforcement: "ran" → gNB-HTTP, "ngap" → AF/PCF, "auto" → ran then ngap.
+	CoreMode string
+	// AFConfig configures the AF/PCF enforcer used when CoreMode is ngap/auto.
+	AFConfig afenforcer.Config
 }
 
 type QoSHandler struct {
@@ -29,27 +36,63 @@ type QoSHandler struct {
 }
 
 func NewQoSHandler(cfg QoSConfig) (*QoSHandler, error) {
-	if cfg.RANEndpoint == "" {
-		return nil, errors.New("RAN endpoint is required")
-	}
 	if cfg.Limits == (adaptiveqos.Limits{}) {
 		cfg.Limits = adaptiveqos.DefaultRANLimits()
 	}
 	if cfg.Policy == (adaptiveqos.BurstPolicyConfig{}) {
 		cfg.Policy = adaptiveqos.DefaultBurstPolicyConfig()
 	}
-	ranClient := ranapi.NewClient(cfg.RANEndpoint, cfg.RANTimeout)
-	if cfg.HTTPClient != nil {
-		ranClient.HTTPClient = cfg.HTTPClient
+
+	mode, err := routerenforcer.ParseMode(cfg.CoreMode)
+	if err != nil {
+		return nil, err
 	}
-	if cfg.RANDefaults != (ranapi.RequestDefaults{}) {
-		ranClient.Defaults = cfg.RANDefaults
+
+	// RAN enforcer (gNB-HTTP). Optional in ngap-only deployments.
+	var ranEnforcer adaptiveqos.Enforcer
+	if cfg.RANEndpoint != "" {
+		ranClient := ranapi.NewClient(cfg.RANEndpoint, cfg.RANTimeout)
+		if cfg.HTTPClient != nil {
+			ranClient.HTTPClient = cfg.HTTPClient
+		}
+		if cfg.RANDefaults != (ranapi.RequestDefaults{}) {
+			ranClient.Defaults = cfg.RANDefaults
+		}
+		ranEnforcer = ranClient
 	}
+
+	// AF enforcer (PCF/NGAP). Built when the mode needs it and PCF endpoint is set.
+	var afEnforcer adaptiveqos.Enforcer
+	if (mode == routerenforcer.ModeNGAP || mode == routerenforcer.ModeAuto) && cfg.AFConfig.PCFEndpoint != "" {
+		afCfg := cfg.AFConfig
+		if afCfg.HTTPClient == nil {
+			afCfg.HTTPClient = cfg.HTTPClient
+		}
+		afCfg.Logger = cfg.Logger
+		afEnforcer = afenforcer.New(afCfg)
+	}
+
+	switch mode {
+	case routerenforcer.ModeRAN:
+		if ranEnforcer == nil {
+			return nil, errors.New("ran mode selected but RAN endpoint is empty")
+		}
+	case routerenforcer.ModeNGAP:
+		if afEnforcer == nil {
+			return nil, errors.New("ngap mode selected but AF PCF endpoint is empty")
+		}
+	case routerenforcer.ModeAuto:
+		if ranEnforcer == nil && afEnforcer == nil {
+			return nil, errors.New("auto mode needs at least one of RAN endpoint or AF PCF endpoint")
+		}
+	}
+
+	router := routerenforcer.New(ranEnforcer, afEnforcer, mode)
 	return &QoSHandler{
 		processor: &adaptiveqos.Processor{
 			Policy:         adaptiveqos.NewBurstPolicy(cfg.Policy),
 			LimitsProvider: adaptiveqos.StaticLimits{Value: cfg.Limits},
-			Enforcer:       ranClient,
+			Enforcer:       router,
 		},
 		logger: cfg.Logger,
 	}, nil

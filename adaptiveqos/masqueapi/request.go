@@ -123,11 +123,13 @@ func (r Request) Validate() error {
 
 func (r Request) Intent() adaptiveqos.Intent {
 	var e2eDelay uint64
+	var serviceType string
 	if r.ServiceInfo != nil {
 		e2eDelay = r.ServiceInfo.E2EDelay
+		serviceType = r.ServiceInfo.ServiceType
 	}
 	burst := r.BurstInfo
-	return adaptiveqos.Intent{
+	intent := adaptiveqos.Intent{
 		RequestID: r.RequestID,
 		Flow: adaptiveqos.FlowSelector{
 			RNTI:      dereference(r.RNTI),
@@ -145,7 +147,18 @@ func (r Request) Intent() adaptiveqos.Intent {
 		E2EDelayMS:       e2eDelay,
 		ULTransitDelayMS: firstNonZero(burst.ULTransitDelay, burst.ULTransmissionDelay, burst.ULRealTransmissionMS),
 		DLTransitDelayMS: firstNonZero(burst.DLTransitDelay, burst.DLTransmissionDelay, burst.DLRealTransmissionMS),
+		ServiceType:      serviceType,
 	}
+	if r.PacketFilter != nil {
+		intent.Filter = adaptiveqos.FlowFilter{
+			SrcIP:    r.PacketFilter.SrcIP,
+			DstIP:    r.PacketFilter.DstIP,
+			SrcPort:  r.PacketFilter.SrcPort,
+			DstPort:  r.PacketFilter.DstPort,
+			Protocol: r.PacketFilter.Protocol,
+		}
+	}
+	return intent
 }
 
 type Feedback struct {

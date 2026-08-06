@@ -14,6 +14,21 @@ type FlowSelector struct {
 	SEID      uint64
 }
 
+// FlowFilter carries the service data flow 5-tuple for the AF/PCF path.
+// It mirrors masqueapi.PacketFilter but lives in the model package to avoid
+// an import cycle (masqueapi imports adaptiveqos).
+type FlowFilter struct {
+	SrcIP    string
+	DstIP    string
+	SrcPort  uint16
+	DstPort  uint16
+	Protocol uint8
+}
+
+func (f FlowFilter) Present() bool {
+	return f.SrcIP != "" || f.DstIP != "" || f.SrcPort != 0 || f.DstPort != 0 || f.Protocol != 0
+}
+
 type BurstDemand struct {
 	SizeKB     uint64
 	DurationMS uint64
@@ -37,6 +52,13 @@ type Intent struct {
 	E2EDelayMS       uint64
 	ULTransitDelayMS uint64
 	DLTransitDelayMS uint64
+
+	// Filter carries the SDF 5-tuple for the AF/PCF path (may be zero value
+	// when the upstream request does not include a packet filter).
+	Filter FlowFilter
+	// ServiceType is the upstream service hint (e.g. "voice", "video"); used
+	// by enforcers to derive 5QI when the policy does not carry one.
+	ServiceType string
 }
 
 type Range struct {
