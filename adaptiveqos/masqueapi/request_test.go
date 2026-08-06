@@ -57,6 +57,32 @@ func TestDecodeDoesNotClaimPartialProjectMarkers(t *testing.T) {
 	}
 }
 
+func TestDecodeRecognizesUppercaseFieldNames(t *testing.T) {
+	payload := []byte(`{
+		"request_id":"req-upper-1",
+		"RNTI":11222,
+		"QFI":1,
+		"burst_info":{
+			"ul_burst_size":1024,
+			"ul_burst_duration":100,
+			"dl_burst_size":2048,
+			"dl_burst_duration":100
+		},
+		"service_info":{"e2e_delay":160}
+	}`)
+	request, recognized, err := Decode(payload, "192.0.2.10")
+	if err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	if !recognized {
+		t.Fatal("Decode() recognized = false for uppercase field names")
+	}
+	intent := request.Intent()
+	if intent.Flow.RNTI != 11222 || intent.Flow.QFI != 1 {
+		t.Fatalf("unexpected flow: %+v", intent.Flow)
+	}
+}
+
 func TestDecodeRejectsEachMissingOrZeroBurstField(t *testing.T) {
 	payloads := map[string]string{
 		"ul burst size":     `{"request_id":"req-1","rnti":1,"qfi":1,"burst_info":{"ul_burst_duration":10,"dl_burst_size":10,"dl_burst_duration":10},"service_info":{"e2e_delay":160}}`,

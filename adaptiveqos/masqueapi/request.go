@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	adaptiveqos "github.com/acore2026/adaptive-qos"
 )
@@ -174,11 +175,23 @@ func ErrorFeedback(requestID, errorCode string, err error) []byte {
 
 func hasAllFields(fields map[string]json.RawMessage, names ...string) bool {
 	for _, name := range names {
-		if _, ok := fields[name]; !ok {
+		if !fieldExists(fields, name) {
 			return false
 		}
 	}
 	return true
+}
+
+func fieldExists(fields map[string]json.RawMessage, name string) bool {
+	if _, ok := fields[name]; ok {
+		return true
+	}
+	for key := range fields {
+		if strings.EqualFold(key, name) {
+			return true
+		}
+	}
+	return false
 }
 
 func firstNonZero(values ...uint64) uint64 {
