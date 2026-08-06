@@ -187,6 +187,67 @@ go run ./cmd/target \
 
 `ran-mask` 默认为 `auto`，会按照设计文档中 RAN 字段表里 `MASK` 之后的字段顺序生成 bitmask，并且只为本次 JSON 请求实际携带的字段置 bit。也可以传入十进制 `uint32` 数值手动覆盖，例如 `-ran-mask 4294967295`。
 
+### Mock RAN 联调
+
+没有真实 RAN 时，可以先启动 Mock RAN。Mock RAN 只模拟 gNB-HTTP 下发接口，接收 `POST /api/v1/qos/update`，打印 target 下发的 RAN 请求，并返回 MASQUE 侧需要的 `request_id/status/message`。
+
+启动 Mock RAN：
+
+```bash
+go run ./cmd/mockran \
+  -b 127.0.0.1:8080 \
+  -path /api/v1/qos/update \
+  -status ACCEPTED \
+  -message "mock ran accepted"
+```
+
+再启动 target，并把 RAN endpoint 指向 Mock RAN：
+
+```bash
+go run ./cmd/target \
+  -mode qos \
+  -b 0.0.0.0:7400 \
+  -ran-url http://127.0.0.1:8080/api/v1/qos/update
+```
+
+这样联调链路为：
+
+```text
+MASQUE Proxy -> UDP -> target -> HTTP POST -> mockran -> target -> UDP response -> MASQUE Proxy
+```
+
+Mock RAN 默认开启 `-strict=true`，会校验 target 下发的 RAN 请求至少包含：
+
+```text
+request_id
+mask
+rnti
+q_qfi
+q_mbr_ul
+q_gbr_ul
+q_pdb
+burst_info.ul_burst_size
+burst_info.ul_burst_duration
+```
+
+`burst_info.dl_burst_size` 与 `burst_info.dl_burst_duration` 仍然成对可选。需要只测试链路、不校验字段时，可以加 `-strict=false`。
+
+常用失败场景模拟：
+
+```bash
+go run ./cmd/mockran \
+  -status REJECTED \
+  -http-status 503 \
+  -error-code RAN_BUSY \
+  -message "mock ran rejected qos update"
+```
+
+常用超时场景模拟：
+
+```bash
+go run ./cmd/mockran -delay 5s
+```
+
 Echo 模式仅用于链路测试：
 
 ```bash
