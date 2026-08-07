@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strconv"
 	"sync"
 	"time"
 
@@ -45,34 +46,46 @@ func New(cfg Config) *Enforcer {
 	}
 }
 
-// sdfFilter is the service data flow 5-tuple carried to the PCF.
-type sdfFilter struct {
-	SrcIP    string `json:"src_ip,omitempty"`
-	DstIP    string `json:"dst_ip,omitempty"`
-	SrcPort  uint16 `json:"src_port,omitempty"`
-	DstPort  uint16 `json:"dst_port,omitempty"`
-	Protocol uint8  `json:"protocol,omitempty"`
+// --- 3GPP AppSessionContextReqData (TS 29.514 / acore2026 openapi v1.2.4) ---
+// Only the fields the AF uses are modeled; the rest stay absent (omitempty).
+// JSON tags match the openapi model exactly so a real free5gc PCF accepts it.
+
+type snssaiJSON struct {
+	Sst int32  `json:"sst"`
+	Sd  string `json:"sd,omitempty"`
 }
 
-// appSessionRequest is the intermediate AF JSON sent to the PCF app-session
-// collection. Phase 3 (real free5gc PCF联调) adapts this to the exact 3GPP
-// AppSessionContextReqData shape; the field set maps 1:1 so the conversion is
-// localized here.
-type appSessionRequest struct {
-	RequestID  string    `json:"request_id"`
-	UEIP      string    `json:"ue_ip"`
-	SUPI      string    `json:"supi,omitempty"`
-	DNN       string    `json:"dnn,omitempty"`
-	SNSSAI    SNSSAI    `json:"snssai,omitempty"`
-	QFI       uint8     `json:"qfi,omitempty"`
-	FiveQI    uint8     `json:"five_qi"`
-	MBRUL     uint64    `json:"mbr_ul"`
-	MBRDL     uint64    `json:"mbr_dl,omitempty"`
-	GBRUL     uint64    `json:"gbr_ul,omitempty"`
-	GBRDL     uint64    `json:"gbr_dl,omitempty"`
-	ARP       ARPConfig `json:"arp"`
-	SDF       *sdfFilter `json:"sdf,omitempty"`
-	DurationMs uint64    `json:"duration_ms"`
+type mediaSubComponentJSON struct {
+	FNum    int32    `json:"fNum"`
+	FStatus string   `json:"fStatus,omitempty"`
+	FDescs  []string `json:"fDescs,omitempty"`
+}
+
+type mediaComponentJSON struct {
+	MedCompN     int32                            `json:"medCompN"`
+	FStatus      string                           `json:"fStatus,omitempty"`
+	QosReference string                           `json:"qosReference,omitempty"`
+	MarBwDl      string                           `json:"marBwDl,omitempty"`
+	MarBwUl      string                           `json:"marBwUl,omitempty"`
+	MedSubComps  map[string]mediaSubComponentJSON `json:"medSubComps,omitempty"`
+}
+
+type appSessionRequestJSON struct {
+	AfAppId       string                        `json:"afAppId,omitempty"`
+	NotifUri      string                        `json:"notifUri"`
+	SuppFeat      string                        `json:"suppFeat"`
+	Supi          string                        `json:"supi,omitempty"`
+	UeIpv4        string                        `json:"ueIpv4,omitempty"`
+	Dnn           string                        `json:"dnn,omitempty"`
+	SliceInfo     *snssaiJSON                   `json:"sliceInfo,omitempty"`
+	MedComponents map[string]mediaComponentJSON `json:"medComponents,omitempty"`
+}
+
+// appSessionContextJSON wraps AscReqData, matching the 3GPP AppSessionContext
+// shape the PCF deserializes (see api_policyauthorization.go HTTPPostAppSessions:
+// it reads appSessionContext.AscReqData, not flat fields).
+type appSessionContextJSON struct {
+	AscReqData *appSessionRequestJSON `json:"ascReqData"`
 }
 
 func kbpsToBps(kbps uint64) uint64 {
@@ -101,36 +114,72 @@ func burstDurationMs(intent adaptiveqos.Intent) uint64 {
 	return d
 }
 
-// buildAppSessionBody assembles the AF request from the Intent+Decision+cfg.
-// Isolated so Phase 3 can swap to the real PCF wire format.
+// buildAppSessionBody assembles the 3GPP AppSessionContextReqData JSON for the
+// real PCF Npcf_PolicyAuthorization service. MediaComponent carries
+// qosReference (=5QI) and marBwDl/Ul (=MBR); for a GBR 5QI the PCF/SMF apply
+// the standardized GBR/ARP. Custom GBR/ARP would need AltSerReqsData (later).
 func (e *Enforcer) buildAppSessionBody(intent adaptiveqos.Intent, decision adaptiveqos.Decision) ([]byte, error) {
 	ueIP := intent.Flow.UEAddress
 	supi := e.cfg.resolveSUPI(ueIP)
-	req := appSessionRequest{
-		RequestID:  intent.RequestID,
-		UEIP:      ueIP,
-		SUPI:      supi,
-		DNN:       e.cfg.DefaultDNN,
-		SNSSAI:    e.cfg.DefaultSlice,
-		QFI:       intent.Flow.QFI,
-		FiveQI:    e.cfg.DefaultFiveQI,
-		MBRUL:     kbpsToBps(decision.MBRULKbps),
-		MBRDL:     kbpsToBps(decision.MBRDLKbps),
-		GBRUL:     kbpsToBps(decision.GBRULKbps),
-		GBRDL:     kbpsToBps(decision.GBRDLKbps),
-		ARP:       e.cfg.ARP,
-		DurationMs: burstDurationMs(intent),
+	mc := mediaComponentJSON{
+		MedCompN:     1,
+		FStatus:      "ENABLED",
+		QosReference: strconv.FormatUint(uint64(e.cfg.DefaultFiveQI), 10),
+		MarBwUl:      strconv.FormatUint(kbpsToBps(decision.MBRULKbps), 10),
+		MarBwDl:      strconv.FormatUint(kbpsToBps(decision.MBRDLKbps), 10),
+		MedSubComps: map[string]mediaSubComponentJSON{
+			"1": {FNum: 1, FStatus: "ENABLED"},
+		},
 	}
-	if intent.Filter.Present() {
-		req.SDF = &sdfFilter{
-			SrcIP:    intent.Filter.SrcIP,
-			DstIP:    intent.Filter.DstIP,
-			SrcPort:  intent.Filter.SrcPort,
-			DstPort:  intent.Filter.DstPort,
-			Protocol: intent.Filter.Protocol,
-		}
+	if descs := buildFlowDescription(intent.Filter, ueIP); len(descs) > 0 {
+		sub := mc.MedSubComps["1"]
+		sub.FDescs = descs
+		mc.MedSubComps["1"] = sub
 	}
-	return json.Marshal(req)
+	req := appSessionRequestJSON{
+		AfAppId:       e.cfg.AfAppId,
+		NotifUri:      e.cfg.NotifUri,
+		SuppFeat:      e.cfg.SuppFeat,
+		Supi:          supi,
+		UeIpv4:        ueIP,
+		Dnn:           e.cfg.DefaultDNN,
+		SliceInfo:     &snssaiJSON{Sst: e.cfg.DefaultSlice.SST, Sd: e.cfg.DefaultSlice.SD},
+		MedComponents: map[string]mediaComponentJSON{"1": mc},
+	}
+	return json.Marshal(appSessionContextJSON{AscReqData: &req})
+}
+
+// buildFlowDescription builds 3GPP FlowDescription strings (TS 29.212) in the
+// format the free5gc SMF packet-filter parser expects, e.g.
+//   "permit out ip from <src> <sport> to <dst> <dport>"
+// Always returns UL + DL flows keyed on the UE IP so the SMF can classify
+// traffic (an empty fDescs makes the SMF fail with "too few fields").
+func buildFlowDescription(f adaptiveqos.FlowFilter, ueIP string) []string {
+	src := ueIP
+	if f.SrcIP != "" {
+		src = f.SrcIP
+	}
+	dst := "0.0.0.0/0"
+	if f.DstIP != "" {
+		dst = f.DstIP
+	}
+	if src == "" {
+		return nil
+	}
+	ul := "permit out ip from " + src
+	dl := "permit in ip from " + dst
+	if f.SrcPort != 0 {
+		ul += " " + strconv.Itoa(int(f.SrcPort))
+	}
+	if f.DstPort != 0 {
+		dl += " " + strconv.Itoa(int(f.DstPort))
+	}
+	ul += " to " + dst
+	dl += " to " + src
+	if f.DstPort != 0 {
+		ul += " " + strconv.Itoa(int(f.DstPort))
+	}
+	return []string{ul, dl}
 }
 
 func (e *Enforcer) Apply(ctx context.Context, intent adaptiveqos.Intent, decision adaptiveqos.Decision) (adaptiveqos.ApplyResult, error) {

@@ -40,6 +40,17 @@ type Config struct {
 	HTTPClient    *http.Client
 	EndGrace      time.Duration // extra grace before auto-terminating the app-session
 	Logger        *log.Logger
+
+	// NotifUri is the mandatory PCF notification callback URI (3GPP
+	// AppSessionContextReqData.notifUri). The PCF POSTs QoS events here.
+	// The QoS module does not yet serve this callback; set a placeholder
+	// (create still succeeds, notifications are async).
+	NotifUri string
+	// SuppFeat is the mandatory hex feature bitmap (notifUri+suppFeat are the
+	// two non-omitempty fields). "0" = no optional features.
+	SuppFeat string
+	// AfAppId identifies the AF application (free text).
+	AfAppId string
 }
 
 func DefaultConfig() Config {
@@ -50,6 +61,9 @@ func DefaultConfig() Config {
 		DefaultSlice:  SNSSAI{SST: 1, SD: "000000"},
 		ARP:           ARPConfig{PriorityLevel: 3, PreemptCap: true, PreemptVuln: false},
 		EndGrace:      2 * time.Second,
+		NotifUri:      "http://127.0.0.1:0/pcf-notif",
+		SuppFeat:      "0",
+		AfAppId:       "qos-module",
 	}
 }
 
