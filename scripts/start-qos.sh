@@ -1,19 +1,36 @@
 #!/bin/bash
 set -e
 
-# QoS 模块启动脚本 — 支持三种下发模式
-# 用法: ./start-qos.sh <mode> [options]
-# mode: ran | ran-udp | ngap | auto
+# ============================================================
+#  QoS 模块启动脚本 — 支持三种下发模式
+#  用法: ./start-qos.sh <ran|ran-udp|ngap|auto>
 #
-# 环境变量(可选,覆盖默认值):
-#   QOS_BIND          UDP 监听地址(默认 0.0.0.0:7400)
-#   RAN_URL           gNB HTTP 端点(mode=ran/auto)
-#   RAN_UDP_ENDPOINT  gNB UDP 端点(mode=ran-udp/auto)
-#   RAN_UDP_ACK       gNB UDP 是否回应答(1/0)
-#   PCF_ENDPOINT      PCF PolicyAuthorization URL(mode=ngap/auto)
-#   SUPI_MAP          静态 UE IP→SUPI 映射(mode=ngap),如 10.60.0.1=imsi-001
-#   DEFAULT_5QI       默认 5QI(mode=ngap,默认 2)
-#   DEFAULT_DNN       默认 DNN(mode=ngap,默认 internet)
+#  地址默认值已填入(改这里即可,无需每次传环境变量)
+#  环境变量仍可覆盖默认值(如: SMF_ENDPOINT=http://x:8000 ./start-qos.sh ngap)
+#
+#  注意: 核心网容器 IP(10.100.200.x)在 restart-all 后可能变化,
+#        若连不上,运行 docker inspect <nf> --format '{{...IPAddress}}' 查新 IP
+# ============================================================
+
+# ---- 默认地址(按需修改这里) ----
+QOS_BIND="${QOS_BIND:-0.0.0.0:7400}"
+
+# gNB(HTTP / UDP 直连)
+RAN_URL="${RAN_URL:-http://10.88.120.212:80/api/v1/qos/update}"
+RAN_UDP_ENDPOINT="${RAN_UDP_ENDPOINT:-10.88.120.212:54003}"
+RAN_UDP_ACK="${RAN_UDP_ACK:-0}"
+
+# 核心网(NGAP 经 SMF 方案A / 或 PCF 方案B)
+SMF_IP="${SMF_IP:-10.100.200.5}"          # docker inspect smf 查;restart-all 后可能变
+PCF_IP="${PCF_IP:-10.100.200.12}"          # docker inspect pcf 查;restart-all 后可能变
+SMF_ENDPOINT="${SMF_ENDPOINT:-http://${SMF_IP}:8000}"
+PCF_ENDPOINT="${PCF_ENDPOINT:-http://${PCF_IP}:8000/npcf-policyauthorization/v1/app-sessions}"
+
+# UE 映射(ngap 模式,静态 UE IP→SUPI)
+SUPI_MAP="${SUPI_MAP:-10.60.0.1=imsi-001012345678903}"
+DEFAULT_5QI="${DEFAULT_5QI:-2}"
+DEFAULT_DNN="${DEFAULT_DNN:-internet}"
+# ---- 默认地址结束 ----
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; BLUE='\033[0;34m'; NC='\033[0m'
 ok()   { echo -e "${GREEN}  ✓ $1${NC}"; }
@@ -21,7 +38,6 @@ info() { echo -e "${BLUE}  ℹ $1${NC}"; }
 fail() { echo -e "${RED}  ✗ $1${NC}"; exit 1; }
 
 MODE="${1:-ran}"
-BIND="${QOS_BIND:-0.0.0.0:7400}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TARGET_DIR="$SCRIPT_DIR/../target/target"
 BINARY="$TARGET_DIR/target"
@@ -37,8 +53,8 @@ if [ ! -f "$BINARY" ]; then
     ok "编译完成"
 fi
 
-# 公共 flag
-COMMON_FLAGS="-mode qos -b $BIND"
+# 公共 flag(RAN 调度默认值)
+COMMON_FLAGS="-mode qos -b $QOS_BIND"
 COMMON_FLAGS="$COMMON_FLAGS -transit-ratio 0.8 -default-transit-delay 100ms"
 COMMON_FLAGS="$COMMON_FLAGS -dl-max-mcs 28 -ul-max-mcs 28 -dl-max-rb 273 -ul-max-rb 273"
 COMMON_FLAGS="$COMMON_FLAGS -dl-bler-upper 0.01 -ul-bler-upper 0.01 -dl-smooth 0.5 -ul-smooth 0.5"
@@ -46,71 +62,66 @@ COMMON_FLAGS="$COMMON_FLAGS -q-cap 1 -q-vul 0"
 
 case "$MODE" in
   ran)
-    RAN_URL_VAL="${RAN_URL:-http://127.0.0.1:8080/api/v1/qos/update}"
-    info "mode=ran(HTTP 直连 gNB): $RAN_URL_VAL"
+    info "mode=ran(HTTP 直连 gNB): $RAN_URL"
     exec "$BINARY" $COMMON_FLAGS \
       -core-mode ran \
-      -ran-url "$RAN_URL_VAL" \
+      -ran-url "$RAN_URL" \
       -ran-timeout 3s
     ;;
+
   ran-udp)
-    UDP_EP="${RAN_UDP_ENDPOINT:-127.0.0.1:54003}"
-    UDP_ACK="${RAN_UDP_ACK:-0}"
-    info "mode=ran-udp(UDP 直连 gNB): $UDP_EP (ack=$UDP_ACK)"
+    info "mode=ran-udp(UDP 直连 gNB): $RAN_UDP_ENDPOINT (ack=$RAN_UDP_ACK)"
     exec "$BINARY" $COMMON_FLAGS \
       -core-mode ran-udp \
-      -ran-udp-endpoint "$UDP_EP" \
-      -ran-udp-ack=$UDP_ACK \
+      -ran-udp-endpoint "$RAN_UDP_ENDPOINT" \
+      -ran-udp-ack=$RAN_UDP_ACK \
       -ran-timeout 3s
     ;;
+
   ngap)
-    PCF_VAL="${PCF_ENDPOINT:-}"
-    SUPI_VAL="${SUPI_MAP:-}"
-    FIVEQI="${DEFAULT_5QI:-2}"
-    DNN_VAL="${DEFAULT_DNN:-internet}"
-    if [ -z "$PCF_VAL" ] && [ -n "$SMF_ENDPOINT" ]; then
-      # 方案 A:直连 SMF 的 /qos-update 端点(不经 PCF)
-      info "mode=ngap(SMF 直连 方案A): $SMF_ENDPOINT"
-      info "注意: 方案A 使用 SMF 的 /nsmf-oam/v1/qos-update,不走 PCF"
-      info "需要 fork SMF 镜像(free5gc/smf:fork)已部署"
-      # 方案A 的 enforcer 调 SMF,当前通过 afenforcer 发 PCF 格式或直调 SMF
-      # 若用 SMF 直连,设 PCF_ENDPOINT 为 SMF 的 /nsmf-oam/v1/qos-update
-      PCF_VAL="$SMF_ENDPOINT/nsmf-oam/v1/qos-update"
-    fi
-    [ -z "$PCF_VAL" ] && fail "ngap 模式需要 PCF_ENDPOINT 或 SMF_ENDPOINT 环境变量"
-    info "mode=ngap(经核心网 NGAP): $PCF_VAL"
-    [ -n "$SUPI_VAL" ] && info "SUPI map: $SUPI_VAL"
+    # 方案A:直连 SMF 的 /nsmf-oam/v1/qos-update(需 fork SMF 镜像已部署)
+    NGAP_URL="$SMF_ENDPOINT/nsmf-oam/v1/qos-update"
+    info "mode=ngap(方案A SMF 直连): $NGAP_URL"
+    info "  supi_map=$SUPI_MAP  5qi=$DEFAULT_5QI  dnn=$DEFAULT_DNN"
     exec "$BINARY" $COMMON_FLAGS \
       -core-mode ngap \
-      -pcf-endpoint "$PCF_VAL" \
-      -supi-map "$SUPI_VAL" \
-      -default-5qi "$FIVEQI" \
-      -default-dnn "$DNN_VAL" \
+      -pcf-endpoint "$NGAP_URL" \
+      -supi-map "$SUPI_MAP" \
+      -default-5qi "$DEFAULT_5QI" \
+      -default-dnn "$DEFAULT_DNN" \
       -arp-priority 8 -arp-preempt-cap 1 -arp-preempt-vuln 0
     ;;
+
   auto)
-    RAN_URL_VAL="${RAN_URL:-http://127.0.0.1:8080/api/v1/qos/update}"
-    UDP_EP="${RAN_UDP_ENDPOINT:-}"
-    PCF_VAL="${PCF_ENDPOINT:-}"
-    info "mode=auto(HTTP → UDP → NGAP 依次试)"
-    [ -n "$UDP_EP" ] && info "  UDP fallback: $UDP_EP"
-    [ -n "$PCF_VAL" ] && info "  NGAP fallback: $PCF_VAL"
-    AUTO_FLAGS="$COMMON_FLAGS -core-mode auto -ran-url $RAN_URL_VAL"
-    [ -n "$UDP_EP" ] && AUTO_FLAGS="$AUTO_FLAGS -ran-udp-endpoint $UDP_EP"
-    [ -n "$PCF_VAL" ] && AUTO_FLAGS="$AUTO_FLAGS -pcf-endpoint $PCF_VAL"
-    exec "$BINARY" $AUTO_FLAGS
+    info "mode=auto(HTTP → UDP → NGAP 依次回退)"
+    info "  HTTP: $RAN_URL"
+    info "  UDP:  $RAN_UDP_ENDPOINT"
+    info "  NGAP: $SMF_ENDPOINT/nsmf-oam/v1/qos-update"
+    exec "$BINARY" $COMMON_FLAGS \
+      -core-mode auto \
+      -ran-url "$RAN_URL" \
+      -ran-udp-endpoint "$RAN_UDP_ENDPOINT" \
+      -ran-udp-ack=$RAN_UDP_ACK \
+      -pcf-endpoint "$SMF_ENDPOINT/nsmf-oam/v1/qos-update" \
+      -supi-map "$SUPI_MAP" \
+      -default-5qi "$DEFAULT_5QI" \
+      -default-dnn "$DEFAULT_DNN"
     ;;
+
   *)
     echo "用法: $0 <ran|ran-udp|ngap|auto>"
     echo ""
     echo "  ran      — HTTP 直连 gNB (POST /api/v1/qos/update)"
     echo "  ran-udp  — UDP 直连 gNB (同 JSON,走 UDP)"
-    echo "  ngap     — 经核心网 NGAP (PCF 或 SMF /qos-update)"
+    echo "  ngap     — 经核心网 NGAP (SMF /qos-update → AMF → gNB)"
     echo "  auto     — HTTP → UDP → NGAP 依次回退"
     echo ""
-    echo "环境变量:"
-    echo "  RAN_URL, RAN_UDP_ENDPOINT, RAN_UDP_ACK"
-    echo "  PCF_ENDPOINT, SMF_ENDPOINT, SUPI_MAP, DEFAULT_5QI, DEFAULT_DNN"
+    echo "默认地址(改脚本顶部的变量,或用环境变量覆盖):"
+    echo "  gNB HTTP:  $RAN_URL"
+    echo "  gNB UDP:   $RAN_UDP_ENDPOINT"
+    echo "  SMF:       $SMF_ENDPOINT"
+    echo "  PCF:       $PCF_ENDPOINT"
+    echo "  UE 映射:   $SUPI_MAP"
     exit 1
     ;;
 esac
