@@ -1,5 +1,7 @@
 # 方案 A(SMF 外挂)实现与验证总结
 
+> 文档状态：当前推荐路径的真实联调记录。SMF 端改造位于外部 `acore2026/smf` 仓库；本 QoSModule 仓库尚未实现调用该接口的 `smfenforcer`，因此“全链跑通”指独立接口验证成功，不代表当前 Target 已可通过启动参数使用该路径。
+
 > 时间:2026-08-07
 > 目标:对当前封闭 gNB,让 QoS 下发真正让 RAN 动态调整某 UE 的 QoS。
 > 结论:**方案 A 全链跑通,gNB 建立 DRB(QFI=5/5QI=2 GBR)**。绕开 free5gc PCF 生成 PCC rule 的坏链(方案 B 卡在此)。

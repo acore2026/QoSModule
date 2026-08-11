@@ -1,158 +1,93 @@
-# Target UDP Server 开发内容
+# MASQUE Target UDP Server
 
-本文从 `masque-go_CONNECT-UDP软件设计文档.md` 中提取 Target 模块需要开发的内容。Target 在 MASQUE CONNECT-UDP 架构中只是普通 UDP 服务端，不需要理解 MASQUE、QUIC、HTTP/3、CONNECT-UDP、HTTP Datagram 或 Context ID。
+Target 是 MASQUE Proxy 后端的普通 UDP 服务。它不解析 QUIC、HTTP/3、CONNECT-UDP 或 HTTP Datagram，只处理 Proxy 解封装后的 UDP Payload。
 
-## 模块定位
-
-Target UDP Server 是真正的业务 UDP 服务。MASQUE Proxy 会把 Client 通过 CONNECT-UDP 隧道发送的 UDP Payload 解封装后，用普通 UDP 发给 Target。当前 Proxy -> Target 方向会在业务 Payload 前增加 `CLIENT-IP` 自定义头，Target 需要先解析该头，再处理原始业务 Payload。
-
-Target 看到的通信关系是：
+## 1. 通信关系
 
 ```text
-+-------------------------------+       UDP       +-------------------+
-| MASQUE Proxy 后端 UDP socket |  ----------->   | Target UDP Server |
-| ProxyIP:ProxyRandomPort      |  <-----------   | TargetIP:Port     |
-+-------------------------------+                 +-------------------+
+UE/Client
+  -> MASQUE CONNECT-UDP
+  -> MASQUE Proxy
+  -> 普通 UDP + CLIENT-IP
+  -> Target:7400
+  -> QoS Handler
+  -> Enforcer
 ```
 
-Target 看到的源地址通常是 MASQUE Proxy 创建的后端 UDP socket 地址，不是原始 Client 地址。
+Target 必须监听 Proxy 配置的目标地址，例如：
 
-## 需要开发的内容
+```bash
+go run ./cmd/target -b 0.0.0.0:7400
+```
 
-1. 启动一个普通 UDP Server。
-2. 绑定目标监听地址，例如 `0.0.0.0:7400`。
-3. 循环读取 UDP 报文。
-4. 解析 Proxy 添加的 `CLIENT-IP` 自定义头。
-5. 记录 Client IP 和原始业务 Payload。
-6. 使用 `recvfrom` 返回的来源地址进行回包。
-7. 支持多个来源地址，不要把 Target socket 固定成只能与一个 peer 通信。
+Target 应使用每次 UDP 收包得到的来源地址回包，不固定 Proxy peer。
 
-## 监听要求
+## 2. 收包格式
 
-Target 必须先在目标 IP:Port 上启动监听 socket。这个地址就是 Client 创建 CONNECT-UDP 请求时传给 `masque.NewRequest()` 的 target 参数，也是 Proxy 最终解析出的 `target_host:target_port`。
+### 2.1 普通 Payload
 
-示例目标：
+Proxy 在原始业务 Payload 前增加：
 
 ```text
-192.168.123.100:7400
+CLIENT-IP: <client_ip>\r\n
+\r\n
+<original payload>
 ```
-
-那么 Target 需要监听 UDP 7400 端口：
-
-```text
-bind 0.0.0.0:7400
-```
-
-Proxy 创建 `net.DialUDP()` 只是在 Proxy 侧创建后端 UDP socket，不会替 Target 创建监听 socket。如果 Target 没有监听，Client 可能能成功建立 CONNECT-UDP 隧道，但业务 Payload 无人处理，也收不到有效响应。
-
-## 收包格式
-
-Target 收到的是普通 UDP 报文：
-
-```text
-UDP/IP Header:
-    src = ProxyIP:ProxyRandomPort
-    dst = TargetIP:TargetPort
-
-UDP Payload:
-    CLIENT-IP: <client_ip>\r\n
-    \r\n
-    Client 原始业务 Payload
-```
-
-Target 不会收到 HTTP Datagram 的 Context ID，也不需要解析 MASQUE 封装。但 Target 需要解析 Proxy 添加的 `CLIENT-IP` 自定义头。
 
 示例：
 
 ```text
 CLIENT-IP: 192.168.1.20
 
-hello
+{"request_id":"req-001", ...}
 ```
 
-Target 解析后得到：
+Target 将其解析为：
 
-```text
-client_ip = 192.168.1.20
-original_payload = hello
+- `Message.ClientIP = 192.168.1.20`
+- `Message.Payload = {"request_id":"req-001", ...}`
+
+如果没有 `CLIENT-IP` 头，则使用 UDP 来源 IP 作为兜底。跨机器部署时，该兜底值通常是 Proxy IP，不一定是 UE IP。
+
+### 2.2 可靠请求信封
+
+Target 也支持可靠信封：
+
+```json
+{
+  "type": "request",
+  "request_id": "retry-001",
+  "payload": "<base64 QoS JSON>"
+}
 ```
 
-## 回包要求
+首次处理后，Target 按 `request_id` 缓存响应。TTL 内收到相同请求时不会重复调用下游 Enforcer，而是返回缓存结果：
 
-Target 回包时必须回给本次 `recvfrom()` 返回的源地址：
-
-```text
-UDP/IP Header:
-    src = TargetIP:TargetPort
-    dst = ProxyIP:ProxyRandomPort
-
-UDP Payload:
-    Target 原始响应 Payload
+```json
+{
+  "type": "response",
+  "request_id": "retry-001",
+  "payload": "<base64 response JSON>"
+}
 ```
 
-这会让响应先回到 MASQUE Proxy，再由 Proxy 封装为 HTTP Datagram 转回 Client。
+配置示例见 `reliability.example.json`：
 
-Target 回包时不需要再附加 `CLIENT-IP` 头。`-mode echo` 会基于原始业务 Payload 生成响应，例如收到：
-
-```text
-CLIENT-IP: 192.168.1.20
-
-hello
+```json
+{
+  "ttl": "2m",
+  "max_entries": 10000,
+  "max_payload": 65536,
+  "max_retries": 3,
+  "timeout": "1s"
+}
 ```
 
-默认回包：
+Target 使用 `ttl`、`max_entries` 和 `max_payload`；重试次数和超时由发送端使用。
 
-```text
-reply: hello
-```
+## 3. QoS 请求
 
-## 多来源处理
-
-Target UDP Server 应使用 `bind + recvfrom + sendto` 模型。这个模型可以支持多个 Proxy 后端 UDP socket：
-
-```text
-ProxyIP:51001 -> Target:7400
-ProxyIP:51002 -> Target:7400
-ProxyIP:51003 -> Target:7400
-```
-
-每次收包时都使用本次的来源地址回包：
-
-```text
-data, addr = recvfrom()
-sendto(reply, addr)
-```
-
-除非业务明确要求一对一连接，否则 Target 不应主动调用 UDP `connect()` 固定 peer。
-
-## 最小验收标准
-
-1. Target 能监听配置的 UDP 地址和端口。
-2. Proxy 转发 UDP Payload 到 Target 后，Target 能解析出 `CLIENT-IP`。
-3. Target 能从 UDP Payload 中取出原始业务 Payload。
-4. Target 能基于原始业务 Payload 生成响应，不把 `CLIENT-IP` 头当作业务数据。
-5. Target 能把响应发送回本次来源地址。
-6. Client 能通过 MASQUE Proxy 收到 Target 的原始响应 Payload。
-7. Target 日志能显示来源地址为 Proxy 的后端 UDP socket，并显示解析出的 Client IP。
-
-## QoS业务模式
-
-Target 当前默认运行在 `qos` 模式：
-
-```bash
-go run ./cmd/target \
-  -mode qos \
-  -b 0.0.0.0:7400 \
-  -ran-url http://127.0.0.1:8080/api/v1/qos/update
-```
-
-收到普通 QoS JSON 时，Target 会调用共享 `adaptive-qos` 模块完成：
-
-```text
-masqueapi.Decode -> Request.Intent -> Processor.Process -> BurstPolicy.Generate -> ranapi.Client.Apply
-```
-
-当前 QoS 请求必选字段：
+### 3.1 必选字段
 
 ```text
 request_id
@@ -163,33 +98,124 @@ burst_info.ul_burst_duration
 service_info.e2e_delay
 ```
 
-`burst_info.dl_burst_size` 与 `burst_info.dl_burst_duration` 成对可选。二者同时缺失时只更新 UL；只携带其中一个或值为 0 时返回 `INVALID_PARAM`。
+`burst_info.dl_burst_size` 与 `burst_info.dl_burst_duration` 成对可选：
 
-RAN API默认字段可通过启动参数覆盖，常用参数包括：
+- 两者都缺失：只计算 UL，DL 字段不下发。
+- 只携带一个或任一值为 0：返回 `INVALID_PARAM`。
+
+`source_address` 缺失时使用 `CLIENT-IP`。在 gNB HTTP 路径中，RNTI 和 QFI 是主匹配键；在 AF/PCF 或未来 SMF 路径中，UE IP 是核心网寻址的重要输入。
+
+### 3.2 请求示例
+
+```json
+{
+  "request_id": "req-video-001",
+  "rnti": 11222,
+  "qfi": 5,
+  "source_address": "10.60.0.1",
+  "packet_filter": {
+    "src_ip": "10.60.0.1",
+    "dst_ip": "10.0.0.5",
+    "dst_port": 443,
+    "protocol": 6
+  },
+  "burst_info": {
+    "ul_burst_size": 120,
+    "ul_burst_duration": 100,
+    "dl_burst_size": 300,
+    "dl_burst_duration": 100,
+    "ul_transit_delay": 80,
+    "dl_transit_delay": 80
+  },
+  "service_info": {
+    "service_type": "videostreaming",
+    "e2e_delay": 160
+  }
+}
+```
+
+## 4. 处理流程
+
+```text
+server.go
+  -> 解析 CLIENT-IP 和可靠信封
+  -> qos_handler.go
+  -> masqueapi.Decode
+  -> Request.Intent
+  -> Processor.Process
+      -> StaticLimits.Limits
+      -> BurstPolicy.Generate
+      -> RouterEnforcer.Apply
+  -> UDP 原路回包
+```
+
+策略公式：
+
+```text
+MBR = burst_size_kB * 8000 / burst_duration_ms
+GBR = burst_size_kB * 8000 / transit_delay_ms
+PDB = e2e_delay_ms * 0.625
+Priority = 3
+```
+
+速率向上取整，PDB 四舍五入，然后按 `Limits` 裁剪。
+
+## 5. 下发模式
+
+### 5.1 当前代码支持
+
+| `-core-mode` | 实际 Enforcer | 状态 |
+| --- | --- | --- |
+| `ran` | `ranapi.Client` | 默认；调用 gNB HTTP API |
+| `ngap` | `afenforcer.Enforcer` | 调用 PCF，不是 Target 直接发送 NGAP |
+| `auto` | 先 RAN，失败后 AF/PCF | 只有 RAN 返回 `ACCEPTED` 才停止回退 |
+
+已经验证成功的 SMF `/nsmf-oam/v1/qos-update` 尚未接入 Target，当前不存在 `-core-mode smf`。
+
+### 5.2 gNB HTTP 模式
 
 ```bash
 go run ./cmd/target \
   -mode qos \
-  -ran-url http://127.0.0.1:8080/api/v1/qos/update \
-  -ran-mask auto \
-  -q-type 0 \
-  -q-cap 1 \
-  -q-vul 0 \
-  -dl-max-mcs 28 \
-  -ul-max-mcs 28 \
-  -dl-max-rb 273 \
-  -ul-max-rb 273 \
-  -dl-bler-upper 0.01 \
-  -ul-bler-upper 0.01 \
-  -dl-smooth 0.5 \
-  -ul-smooth 0.5
+  -b 0.0.0.0:7400 \
+  -core-mode ran \
+  -ran-url http://127.0.0.1:8080/api/v1/qos/update
 ```
 
-`ran-mask` 默认为 `auto`，会按照设计文档中 RAN 字段表里 `MASK` 之后的字段顺序生成 bitmask，并且只为本次 JSON 请求实际携带的字段置 bit。也可以传入十进制 `uint32` 数值手动覆盖，例如 `-ran-mask 4294967295`。
+常用 RAN 参数：
 
-### Mock RAN 联调
+```text
+-ran-timeout
+-ran-mask
+-q-type
+-q-cap
+-q-vul
+-dl-max-mcs / -ul-max-mcs
+-dl-max-rb / -ul-max-rb
+-dl-bler-upper / -ul-bler-upper
+-dl-smooth / -ul-smooth
+```
 
-没有真实 RAN 时，可以先启动 Mock RAN。Mock RAN 只模拟 gNB-HTTP 下发接口，接收 `POST /api/v1/qos/update`，打印 target 下发的 RAN 请求，并返回 MASQUE 侧需要的 `request_id/status/message`。
+`-ran-mask auto` 会根据实际序列化字段自动置位。UL-only 请求不会设置 DL 字段对应的 bit。
+
+### 5.3 AF/PCF 模式
+
+```bash
+go run ./cmd/target \
+  -mode qos \
+  -b 0.0.0.0:7400 \
+  -core-mode ngap \
+  -pcf-endpoint http://pcf.free5gc.org:8000/npcf-policyauthorization/v1/app-sessions \
+  -supi-map "10.60.0.1=imsi-001012345678903" \
+  -default-dnn internet \
+  -default-5qi 2
+```
+
+AF/PCF 路径使用 UE IP 查静态 SUPI 映射，并生成真实 3GPP `AppSessionContext` 请求。真实 PCF 已接受该格式，但当前 free5GC PCF→SMF apply 链存在 panic/重复 URR 问题，所以该模式不应被视为当前生产可用路径。
+
+`cmd/mockpcf` 仍按早期平铺 JSON 结构进行严格校验，而 `afenforcer` 已改为 `ascReqData` 包装结构。更新 Mock PCF 前，不能把二者的严格模式测试结果作为当前协议验证依据。
+
+## 6. Mock RAN 联调
 
 启动 Mock RAN：
 
@@ -201,22 +227,24 @@ go run ./cmd/mockran \
   -message "mock ran accepted"
 ```
 
-再启动 target，并把 RAN endpoint 指向 Mock RAN：
+启动 Target：
 
 ```bash
 go run ./cmd/target \
   -mode qos \
   -b 0.0.0.0:7400 \
+  -core-mode ran \
   -ran-url http://127.0.0.1:8080/api/v1/qos/update
 ```
 
-这样联调链路为：
+链路为：
 
 ```text
-MASQUE Proxy -> UDP -> target -> HTTP POST -> mockran -> target -> UDP response -> MASQUE Proxy
+MASQUE Proxy -> UDP -> Target -> HTTP POST -> Mock RAN
+             <- UDP response <- Target <- HTTP response
 ```
 
-Mock RAN 默认开启 `-strict=true`，会校验 target 下发的 RAN 请求至少包含：
+Mock RAN 默认 `-strict=true`，至少校验：
 
 ```text
 request_id
@@ -230,9 +258,7 @@ burst_info.ul_burst_size
 burst_info.ul_burst_duration
 ```
 
-`burst_info.dl_burst_size` 与 `burst_info.dl_burst_duration` 仍然成对可选。需要只测试链路、不校验字段时，可以加 `-strict=false`。
-
-常用失败场景模拟：
+失败和超时模拟：
 
 ```bash
 go run ./cmd/mockran \
@@ -240,106 +266,49 @@ go run ./cmd/mockran \
   -http-status 503 \
   -error-code RAN_BUSY \
   -message "mock ran rejected qos update"
-```
 
-常用超时场景模拟：
-
-```bash
 go run ./cmd/mockran -delay 5s
 ```
 
-Windows 笔记本一键启动，在仓库根目录执行：
+## 7. Windows 一键联调
+
+在仓库根目录执行：
 
 ```powershell
 .\scripts\start-windows-mock-test.ps1
 ```
 
-也可以双击仓库中的：
+或双击：
 
 ```text
 scripts\start-windows-mock-test.bat
 ```
 
-默认会打开两个 PowerShell 窗口：
+脚本默认启动：
 
 ```text
-Mock RAN:  http://127.0.0.1:18081/api/v1/qos/update
-Target:    UDP 0.0.0.0:7400
+Mock RAN: http://127.0.0.1:18081/api/v1/qos/update
+Target:   UDP 0.0.0.0:7400
 ```
 
-如果 MASQUE Proxy 也在同一台 Windows 笔记本上，target 配置为：
+MASQUE Proxy 与 Target 不在同一台机器时，需要使用 Windows 局域网 IP，并放行入站 UDP 7400。
 
-```text
-127.0.0.1:7400
-```
+## 8. Echo 模式
 
-如果 MASQUE Proxy 在其他机器上，target 配置为 Windows 笔记本的局域网地址：
-
-```text
-<Windows-LAN-IP>:7400
-```
-
-此时需要在 Windows 防火墙中允许入站 UDP 7400。
-
-Echo 模式仅用于链路测试：
+Echo 模式只验证 MASQUE UDP 转发：
 
 ```bash
 go run ./cmd/target -mode echo -prefix "reply: "
 ```
 
-## 设计文档来源
+## 9. 测试
 
-主要对应设计文档中的以下章节：
-
-- `4.2 Target UDP Server 启动监听 socket`
-- `4.6 Target 监听 socket 与 MASQUE 的关系`
-- `4.7 Target 监听 socket 的消息格式`
-- `7.5 Proxy 到 Target 的 UDP 消息格式`
-- `8.2 Target UDP Server 回包逻辑`
-- `8.3 UDP socket 是否只能一对一`
-- `8.4 Target 到 Proxy 的 UDP 消息格式`
-
-## 可靠请求去重缓存
-
-Target 支持解析 Client 封装的可靠请求信封：
-
-```json
-{
-  "type": "request",
-  "request_id": "<唯一请求ID>",
-  "payload": "<base64编码后的原始payload>"
-}
+```bash
+go test ./...
 ```
 
-首次收到某个 `request_id` 时，Target 会基于原始业务 payload 生成响应，并缓存：
+当前缺口：
 
-```text
-request_id -> response payload
-```
-
-如果在 `ttl` 时间内再次收到同一个 `request_id`，Target 不重复执行业务处理，直接返回缓存响应。响应格式为：
-
-```json
-{
-  "type": "response",
-  "request_id": "<同一个请求ID>",
-  "payload": "<base64编码后的响应payload>"
-}
-```
-
-可靠机制配置文件示例：
-
-```json
-{
-  "ttl": "2m",
-  "max_entries": 10000,
-  "max_payload": 65536,
-  "max_retries": 3,
-  "timeout": "1s"
-}
-```
-
-Target 主要使用 `ttl`、`max_entries` 和 `max_payload`；`max_retries`、`timeout` 由 Client 使用。启动时通过 `-config reliability.example.json` 指定配置文件。
-
-可靠信封包住 QoS JSON 时，Target 会先解出原始 QoS payload，再调用 QoS Handler。相同可靠 `request_id` 在 TTL 内重传时，Target 不会再次调用 RAN，而是返回第一次缓存的响应。
-- `11. 关键结论`
+- `afenforcer` 和 `routerenforcer` 没有独立单元测试。
+- `mockpcf` 没有测试，且协议模型落后于当前 `afenforcer`。
+- 尚无 `smfenforcer` 和 SMF Mock 联调测试。

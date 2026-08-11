@@ -15,10 +15,9 @@ import (
 	"time"
 )
 
-// mockpcf is a Phase-2 stand-in for a real free5gc PCF Npcf_PolicyAuthorization
-// service. It accepts the intermediate AF JSON emitted by afenforcer and
-// records/terminates app-sessions so the QoS module can be exercised without
-// a real core network. See NGAP下发改造方案.md §8 阶段2.
+// mockpcf is the legacy Phase-2 stand-in for PCF PolicyAuthorization. Its flat
+// request model predates afenforcer's real 3GPP ascReqData wrapper, so strict
+// mode is not currently compatible with the production enforcer payload.
 type serverConfig struct {
 	createPath  string
 	status      string

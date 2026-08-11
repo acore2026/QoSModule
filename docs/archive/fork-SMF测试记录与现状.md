@@ -1,5 +1,7 @@
 # fork SMF 镜像测试记录 + 当前现状(暂停点)
 
+> 归档状态：失败链路的实验记录。后续已经采用 SMF 外挂端点绕过该 PCF→SMF ApplyPccRules 路径。
+
 > 时间:2026-08-07
 > 背景:阶段3 真 PCF 联调卡在 stock SMF `ApplyPccRules` nil panic。尝试换 fork SMF 镜像(含上游修复)看是否解决。
 > 结论:**fork SMF 修了 panic,但撞新的 `Duplicate URR creation`,QoS 仍到不了 gNB**。已回退 stock,暂停。

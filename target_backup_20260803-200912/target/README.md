@@ -1,5 +1,7 @@
 # QoS Target UDP Server
 
+> 归档状态：这是 2026-08-03 的 Target 源码快照，不是当前运行入口。请使用 `target/target/` 及其 README。
+
 Target 现在支持两种模式：
 
 - `qos`（默认）：解析 MASQUE Proxy 转发的 QoS JSON，调用共享

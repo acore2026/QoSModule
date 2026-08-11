@@ -1,16 +1,24 @@
-## 7.30 修改意见
+# 随路 QoS 模块设计文档
+
+> 文档状态：部分实施，2026-08-11 根据代码复核。本文的 MASQUE 请求和 BurstPolicy 计算规则仍与当前代码一致；`POST /api/v1/qos/update`、RNTI、MASK、MCS/RB/BLER 等章节只描述可编程 gNB HTTP 适配器，不适用于当前封闭厂商基站。
+>
+> 当前仓库还实现了 AF/PCF 路径（`-core-mode ngap`），但真实 free5GC 链路受 SMF 问题阻塞。已经跑通当前基站的方案是外部 SMF `/nsmf-oam/v1/qos-update` 经 AMF 发送标准 NGAP，不过本仓库尚未实现 `smfenforcer`。详情见《NGAP 下发改造方案》和《方案 A：SMF 外挂实现与验证》。
+>
+> 当前方案不会通过 GTP-U 自定义扩展头向基站传输 QoS JSON。
+
+## 修改意见
 
 1、MASQUE proxy带上源地址带给后端服务器。
 2、以计算的MBR、GBR、PDB作为目标结果，按RAN接口范围裁剪后下发，用高优先级（3）。
-3、当前版本不查询现有QoS、不做PFCP modify，直接向RAN下发；UPF查询作为未来保留项。
+3、gNB HTTP模式不查询现有QoS、不做PFCP modify，直接向RAN下发；UPF查询作为未来保留项。
 4、QoS模块通过MASQUE Proxy向UE回送RAN下发结果。
 5、计算GBR时，比例按照真实的传输时延比例修改；真实传输时延来源暂作为保留项。
 
 ## 主要功能
 
-QoS模块主要负责接收Qos协同请求的Masque消息，将携带突发参数的请求消息转化为QoS诉求，生成QoS策略并通过RAN API下发。当前版本不查询UPF现有QoS策略，也不做PFCP modify；UPF查询能力作为未来扩展保留项。
+QoS模块主要负责接收QoS协同请求的MASQUE消息，将携带突发参数的请求转换为QoS诉求并生成策略。gNB HTTP模式通过RAN API下发；核心网模式由Enforcer调用PCF，未来将接入已经验证的SMF接口。策略计算不查询UPF现有QoS，UPF查询能力作为未来扩展保留项。
 
-### 组网拓扑图
+### gNB HTTP模式组网拓扑图
 
 ```mermaid
 flowchart LR
@@ -33,7 +41,7 @@ flowchart LR
     UPF -. "现有QoS策略" .-> QoS
 ```
 
-### 流程图
+### gNB HTTP模式流程图
 
 ```mermaid
 sequenceDiagram
@@ -663,22 +671,22 @@ QoS模块收到RAN下发结果后，通过与MASQUE Proxy之间的UDP连接回�
 
 ### RAN侧开发与联调注意事项
 
-RAN侧需要提供并维护`/api/v1/qos/update`接口，接收QoS模块下发的动态QoS更新请求。当前QoS模块以HTTP POST方式同步调用该接口，收到RAN响应后再通过MASQUE Proxy回送给UE，因此RAN响应的`status`、`error_code`和`message`会直接影响UE侧看到的处理结果。
+本节只适用于选择`-core-mode ran`且支持私有HTTP接口的开放RAN。该RAN需要提供并维护`/api/v1/qos/update`，接收QoS模块下发的动态QoS更新请求。Target以HTTP POST方式同步调用该接口，收到RAN响应后再通过MASQUE Proxy回送给UE，因此RAN响应的`status`、`error_code`和`message`会直接影响UE侧看到的处理结果。当前封闭厂商gNB不提供该接口，应走SMF→AMF→NGAP路径。
 
 RAN侧需要重点确认以下内容：
 
 | 事项 | RAN侧要求 | 说明 |
 | --- | --- | --- |
-| 接口路径 | 确认是否使用`POST /api/v1/qos/update` | 若路径不同，需要在QoS模块启动参数或free6gc `gnbControl`配置中调整 |
+| 接口路径 | 确认是否使用`POST /api/v1/qos/update` | 若路径不同，需要通过Target的`-ran-url`调整 |
 | 流匹配 | 确认`rnti + q_qfi`是否足够定位UE和QoS Flow | 当前版本不依赖`source_address`或五元组定位RAN侧流 |
 | 单位 | 确认`q_mbr_*`、`q_gbr_*`单位为kbps，`q_pdb`单位为ms，`burst_size`单位为kB | 若RAN使用bit、byte、bps或其他单位，需要调整适配层换算 |
 | 取值范围 | 确认MBR、GBR、PDB、MCS、RB、BLER、smooth等范围 | 当前QoS模块已按本文档范围裁剪，但RAN侧仍需做边界校验 |
 | MASK | 确认当前按字段顺序生成bitmask是否符合RAN实现 | 若RAN已有正式bit定义，应以RAN定义为准修改映射 |
 | UL-only更新 | 支持只携带UL字段的请求 | 当MASQUE请求不携带完整DL burst时，QoS模块不会下发DL字段，RAN不得将缺失DL字段按0覆盖 |
-| 默认控制字段 | 确认`q_type`、`q_cap`、`q_vul`、MCS、RB、BLER、smooth默认值是否可接受 | standalone target可通过启动参数覆盖；free6gc内嵌路径后续可按配置扩展 |
+| 默认控制字段 | 确认`q_type`、`q_cap`、`q_vul`、MCS、RB、BLER、smooth默认值是否可接受 | Target可通过启动参数覆盖 |
 | 响应格式 | 返回JSON格式的`request_id`、`status`、`message`，失败时建议携带`error_code` | `status`建议使用`ACCEPTED`或`REJECTED` |
 | 幂等性 | 建议按`request_id`具备幂等处理能力 | Target侧已对MASQUE可靠重传做缓存，但RAN侧具备幂等能力有利于异常恢复 |
-| 超时 | RAN接口应尽快返回明确结果 | free6gc内嵌路径同步等待RAN响应；RAN过慢会影响随路QoS回包时延 |
+| 超时 | RAN接口应尽快返回明确结果 | Target同步等待RAN响应；RAN过慢会影响随路QoS回包时延 |
 
 RAN侧联调时建议先使用两类典型请求验证：
 

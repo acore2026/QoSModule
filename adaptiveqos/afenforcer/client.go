@@ -13,11 +13,10 @@ import (
 
 // client talks to a PCF PolicyAuthorization app-session collection.
 //
-// Against a real free5gc PCF the request/response must follow 3GPP TS 29.514
-// (AppSessionContextReqData). Against the bundled mockpcf the intermediate
-// JSON produced by buildAppSessionBody is sufficient. The wire shape is
-// isolated here so Phase 3 can swap the body/headers without touching the
-// enforcer.
+// Requests use the 3GPP TS 29.514 AppSessionContext shape accepted by the real
+// free5gc PCF. The wire handling stays isolated here so authentication,
+// discovery, notification and response normalization can evolve separately
+// from policy generation.
 type client struct {
 	endpoint string
 	httpc    *http.Client
@@ -34,8 +33,8 @@ func newClient(cfg Config) *client {
 	return &client{endpoint: cfg.PCFEndpoint, httpc: httpc}
 }
 
-// createResponse is the intermediate response shape returned by mockpcf and,
-// when adapted, by the real PCF.
+// createResponse is the legacy/mock response subset used when a JSON body is
+// available. A real PCF may identify the session only through Location.
 type createResponse struct {
 	AppSessionID string `json:"app_session_id"`
 	Status       string `json:"status"`

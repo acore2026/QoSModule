@@ -24,11 +24,9 @@ type ARPConfig struct {
 // PCFEndpoint is the full URL of the PCF PolicyAuthorization app-session
 // collection, e.g. http://pcf.free5gc.org:8000/npcf-policyauthorization/v1/app-sessions.
 //
-// NOTE: the request body emitted by this enforcer is an intermediate AF JSON
-// (see enforcer.go buildAppSessionBody). Adapting it to the exact 3GPP
-// AppSessionContextReqData expected by a real free5gc PCF is the Phase 3 step
-// documented in NGAP下发改造方案.md §8. Against the bundled mockpcf the
-// intermediate format is sufficient.
+// The enforcer emits the 3GPP AppSessionContext wrapper expected by the real
+// free5gc PCF. The bundled mockpcf still models the older flat phase-2 payload
+// and must be updated before it can validate this request in strict mode.
 type Config struct {
 	PCFEndpoint   string
 	Timeout       time.Duration

@@ -1,5 +1,7 @@
 # 阶段3 真 PCF 联调验证记录
 
+> 归档状态：失败链路的实验记录，用于保留问题证据，不代表当前推荐部署方案。
+
 > 时间:2026-08-07
 > 目标:把 afenforcer 从中间格式适配为真 free5gc PCF 的 3GPP `AppSessionContextReqData`,跑通 AF→PCF→SMF→AMF→gNB 全链,验证 QoS 是否让 RAN 动态调整某 UE。
 > 结论:**AF→PCF→SMF-notify→ApplyPccRules 信令链全通,格式 100% 正确**;最后一步 SMF 处理生成的 PCC rule 时 nil 指针 panic(free5gc SMF/PCF 集成 bug),未到 AMF/gNB。

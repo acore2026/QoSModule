@@ -1,326 +1,268 @@
-# QoS 模块双模下发改造方案
+# NGAP 下发改造方案
 
-> 目标:**保留**原有 gNB-HTTP 下发路径(给支持 `/api/v1/qos/update` 的其他基站),**新增** NGAP 下发路径(给当前这台封闭基站),两条路径在同一个 QoS 模块内**并存**,按基站能力切换。
-> 原则:gNB-HTTP 路径的代码与线缆格式**原样保留不动**(不加 5QI、不改 model/policy);NGAP 路径的所有改动**隔离在新增 Enforcer 包内**。
+> 状态日期：2026-08-11。
+>
+> 当前结论：封闭厂商 gNB 不提供 `/api/v1/qos/update`，应由核心网通过标准 NGAP 下发。SMF 外挂路径已经在外部 `acore2026/smf` 仓库完成端到端验证，但 QoSModule 尚未实现 `smfenforcer`，因此当前 Target 还不能直接选择该路径。
 
----
+## 1. 目标与边界
 
-## 1. 两种基站,两条路径
+QoSModule 负责接收 MASQUE 请求并计算动态 QoS。不同基站通过可替换的 Enforcer 使用不同下发路径：
 
-| 基站类型 | 是否支持 `POST /api/v1/qos/update` | 下发路径 | 模块状态 |
-|---|---|---|---|
-| 其他基站(软件/开放 gNB) | ✅ 支持 | **gNB-HTTP 直连**(`ranapi.Client`) | 已有,原样保留 |
-| 当前基站(封闭厂商 BBU) | ❌ 不支持 | **NGAP 经核心网**(`afenforcer` 新增,扮 AF→PCF) | 待实现 |
+| 路径 | 适用对象 | 当前状态 |
+| --- | --- | --- |
+| gNB HTTP | 支持私有 QoS HTTP API 的开放 gNB、Mock RAN | 本仓库已实现并测试 |
+| AF/PCF | 支持完整 free5GC Policy Authorization 链路的部署 | 本仓库已实现 AF 请求；真实链路被 PCF/SMF 问题阻塞 |
+| SMF 外挂 | 当前封闭厂商 gNB | 外部 SMF 已跑通；本仓库尚未接入 |
 
-切换由配置 `mode`(`ran`/`ngap`/`auto`)决定,程序内用 `RouterEnforcer` 分发,见 §5。
+NGAP 不由 QoSModule 或 UPF 直接发送。标准职责链是：
 
----
-
-## 2. 当前基站详细情况(给 NGAP 开发参考)
-
-> 开发 NGAP 路径前必须搞清这台基站的接口,以确认"只能走 NGAP、不能走 HTTP/直连"。
-
-### 2.1 基本信息
-
-| 项 | 值 |
-|---|---|
-| 地址 | `10.88.120.212`(eth1 网段,AMF 在 `10.88.120.100`) |
-| 登录 | `root`,已授权本机公钥(`ssh -i ~/.ssh/id_ed25519 root@10.88.120.212`) |
-| hostname | localhost |
-| 硬件 | NXP Layerscape **ARM64(aarch64)** BBU |
-| 内核 | `4.19.68-241.00.2_N78_20240613_v2.5.5`(N78 频段,2024-06-13 构建) |
-| 系统 | NXP LSDK 2004 main |
-| 软件版本 | `5GNR_t.fa.tdd.fr1.2.2.3.F2_826_20241204_051423`(TDD / FR1 / F2 band,2024-12-04 构建) |
-| 安装路径 | `/opt/loads/5GNR_t.fa.tdd.fr1.2.2.3.F2_826_20241204_051423/rootfs/bts/bin/`、`/opt/bbu/` |
-
-### 2.2 gNB 协议栈进程(经典 split)
-
-| 进程 | 角色 | 关键启动参数 |
-|---|---|---|
-| `cpgnbapp` | **CU-CP**:NGAP/X2-CP | `-localIntGnbNgCpIpAddr`/`-localExtGnbNgCpIpAddr`(=NG 控制面,即 NGAP)、`-backhaulIpAddress 192.0.2.2` |
-| `cpcellapp` | 每小区 RRC | `-nameServerIP 192.0.2.1`、`-callp_mac_intf_type udp` |
-| `cpupproxy` | CP-UP 代理(PDCP 到核心) | `-pdcpCoreIpAddress 192.0.2.2`、`-pdcpCtrlMsgDstPort 4381` |
-| `upapp` | **UP**:PDCP/N3 用户面 | `-pdcpCoreIpAddress 192.0.2.2`、`-l2IpAddress1 192.0.2.10` |
-| `duapp` | **DU**:MAC/RLC 调度器 | `-mac_phy_intf_type intel`、`-callp_mac_intf_type udp`、`-l2CpuInstance 1` |
-| `oamProcess` | OAM(网管) | 监听 7547/8040/27149/27167 |
-| `thttpd` | OAM Web/CGI | `-C /opt/bbu/oam/web/thttpd.conf`,端口 8400 |
-| `apache2` | 默认 Web | 端口 80(仅默认页) |
-
-### 2.3 监听端口(全机)
-
-| 端口 | 协议 | 进程 | 用途 | 可用性 |
-|---|---|---|---|---|
-| 22 | tcp | sshd | SSH 管理 | ✅ 已登录 |
-| 80 | tcp | apache2 | **默认 Apache 页,无 API** | ✗ `POST /api/v1/qos/update` 返回 404 |
-| 8400 | tcp | thttpd | **OAM Web UI + CGI 分发器** | OAM,需 login.cgi 会话 |
-| 7547 | tcp | oamProcess | **TR-069 CWMP**(XML/SOAP) | OAM,XML |
-| 8040 | tcp | oamProcess | OAM(本地) | 本地 |
-| 27149/27167 | tcp | oamProcess | OAM 内部 | 本地 |
-| 514 | udp | rsyslog | syslog | — |
-| 2947 | tcp | gpsd | GPS | — |
-| 38412 | sctp | cpgnbapp | **NGAP**(gNB 作客户端外联 AMF,已 ESTAB) | ✅ 标准控制面 |
-| NETCONF | — | (YANG 模型在 `/opt/bbu/oam/netconf/yang`) | 外部端口未确认 | 未开放 |
-
-### 2.4 OAM CGI 接口(thttpd:8400)
-
-所有 `*.cgi` 都是指向 `web_main.cgi`(单分发器 ELF,未 strip)的符号链接。请求格式:
-```
-POST /public/cgi-bin/<name>.cgi   { "set":"<op>", ...data }   或   { "get":"<op>" }
-```
-均需先经 `login.cgi` 建会话。
-
-| CGI | 主要 set/get 操作 | 范围 |
-|---|---|---|
-| `qos.cgi` | `set_QoS_info`、`set_QoSIndex_list`、`set_SinrToMcsTableQos_list`、`set_Slice_info`、`set_PLMN_info`、`set_NGC_info` | **小区/网络级静态 QoS profile**(Default5QI、QoS index、SINR→MCS 表、切片 QoS) |
-| `ran.cgi` | `set_MAC_info`(PUCCH/PUSCH/PDCCH/PRACH)、`set_McsOffsetTableBe/Voip_info`、`set_RadioBearParam_list`、`set_PDCP_list`、`set_RLC_list`、`set_PHY_info`、`set_BWP`、`set_SIB`、`set_UAC`、`set_DRX` | **小区级无线/MAC/PDCP/RLC 配置** |
-| `rate.cgi` | `get_mac_rate_list`、`get_pdcp_rate_list`(**仅 get**) | **每 UE 速率只读监控**,无 set |
-| `phycell.cgi`/`mobility.cgi`/`son.cgi`/... | 见名 | 小区级配置 |
-
-OAM 里相关常量(可 set,但都是**小区级静态**):`GbrDl/UlThreshold`、`MaxBitRate`、`MaximumDataBurstVolume(MDBV)`、`Default5QI`、`Max5QIEntries`、`DeltaMCS`、`Mcs_0..21`、`CrntiTimerRelease`、`LCH.PrioritisedBitRate`。
-
-### 2.5 duapp 内部调度接口(不可调用)
-
-`duapp`(pid 示例 7659)的内部通信全是**厂商私有二进制协议**,无文档、无 CLI、无可注入命令式 API:
-
-| 通道 | 详情 | 评估 |
-|---|---|---|
-| UDP | `0.0.0.0:54003`(外,MAC CP 接口)、`127.0.0.1:27144/27148/27460`(内) | 私有二进制,发探测无响应 |
-| FIFO | `/tmp/bh0-rlc1.{pdfifo,pgfifo,sdfifo,sgfifo}` | RLC 数据管道 |
-| 共享内存 | `/dev/shm/scshared_root`、`/dev/shm/pmshared_root/LteL2App_1`、SysV `NTP0..7`(96B) | 调度状态可能在此,**布局无头文件,盲写必崩 BBU** |
-| 设备 | `/dev/fsm-tti`(TTI tick)、`/dev/fsm-dp` | 内核驱动,只读时序 |
-| strings | 无 `setMcs/setQos/perUe/inject/debugcli` 等命令式关键词 | 无 CLI/调试口 |
-
-### 2.6 当前基站结论(给开发的硬约束)
-
-1. **没有 `POST /api/v1/qos/update`**:端口 80 是 Apache 默认页,探测返回 404。→ gNB-HTTP 路径对这台基站**不可用**。
-2. **OAM CGI 是小区级静态配置**,改了通常要 cell 重激活(会断 UE),且非每 UE 每 QFI 动态;`rate.cgi` 只读。→ **不能用于 per-UE 实时不断连 QoS 下发**。
-3. **duapp 内部接口私有**,直连调度器需逆向 + 写活共享内存,风险过高。→ **不走直连**。
-4. **唯一可用**的是标准 **NGAP**(SCTP 38412,已和 AMF 建联),`PDUSessionResourceModifyRequest` 可对在线 UE per-UE、实时、不断连下发 QoS flow。→ **当前基站必须走 NGAP**。
-
-> 其他基站若支持 `/api/v1/qos/update`,则继续用 `ranapi.Client` 走 gNB-HTTP,**与 NGAP 路径并存**。
-
----
-
-## 3. 现状架构与接缝
-
-```
-MASQUE Proxy ──► masqueapi.Decode ──► Intent ──► Processor
-                                         │
-                                         ├─ Policy(BurstPolicy) ─► Decision(MBR/GBR/PDB/Priority)
-                                         └─ Enforcer.Apply(ctx, Intent, Decision)
-                                                 ▲
-                                                 │ 当前唯一实现:ranapi.Client(gNB-HTTP)
-                                                   缺:NGAP Enforcer + RouterEnforcer
+```text
+QoSModule -> SMF -> AMF -> gNB
+               |       |
+               |       +-- NGAP PDU Session Resource Modify
+               +-- PFCP Session Modification -> UPF/QER
 ```
 
-关键代码位置:
+## 2. 当前代码事实
 
-| 文件 | 位置 | 作用 | 改动 |
-|---|---|---|---|
-| `adaptiveqos/model.go:105` | `Enforcer` 接口 `Apply(ctx, Intent, Decision) (ApplyResult, error)` | **接缝** | 不动 |
-| `adaptiveqos/model.go:10` | `FlowSelector{RNTI, QFI, UEAddress, SEID}` | 流匹配;**已含 UEAddress/SEID** | 不动(5QI 不加这里) |
-| `adaptiveqos/model.go:77` | `QoSValues{MBRUL/DL/UL/DL Kbps, PDBMS, Priority}` | **缺 5QI**,但 gNB-HTTP 不需要 | 不动 |
-| `adaptiveqos/policy.go:49` | `BurstPolicy.Generate`(`pdbFromBudget`@`policy.go:132`) | 反推 MBR/GBR/PDB | 不动(5QI 派生放 NGAP Enforcer 内) |
-| `adaptiveqos/processor.go:20` | `Processor.Process` | 管线 | 不动 |
-| `adaptiveqos/ranapi/client.go:108` | `ranapi.Client.Apply` | gNB-HTTP Enforcer | **原样保留** |
-| `adaptiveqos/ranapi/client.go:28` | `ranapi.Request`(rnti/mcs/rb/bler/burst) | gNB 线缆格式 | **原样保留,不加 5QI** |
-| `adaptiveqos/masqueapi/request.go` | `masqueapi.Request{...,PacketFilter,SourceAddress,ServiceInfo}` | 输入已含 SDF/UE IP/E2EDelay | 不动(PacketFilter 可由 NGAP Enforcer 直接从原始请求读) |
-| `target/target/qos_handler.go:49` | `Enforcer: ranClient`(只绑一个) | 装配 | 改成装配 `RouterEnforcer` |
+### 2.1 已实现组件
 
----
+| 组件 | 文件 | 行为 |
+| --- | --- | --- |
+| MASQUE 适配 | `adaptiveqos/masqueapi/request.go` | 校验请求并生成 `Intent` |
+| 动态策略 | `adaptiveqos/policy.go` | 计算 MBR、GBR、PDB 和优先级 |
+| gNB HTTP Enforcer | `adaptiveqos/ranapi/client.go` | 调用 `/api/v1/qos/update` |
+| AF/PCF Enforcer | `adaptiveqos/afenforcer/` | 创建 3GPP AppSession，并在 burst 窗口后删除 |
+| 路由 | `adaptiveqos/routerenforcer/router.go` | 支持 `ran`、`ngap`、`auto` |
+| Target 装配 | `target/target/qos_handler.go` | 将 Enforcer 装入共享 Processor |
 
-## 4. 双模设计(共存,不是三选一)
+代码中的 `ngap` 模式实际指向 AF/PCF Enforcer，不表示 Target 直接编码或发送 NGAP。
 
-两条路径**都留在程序里**,由 `RouterEnforcer` 按配置分发;既有 `ranapi.Client` 和管线**全不动**。
+### 2.2 尚未实现组件
 
+本仓库不存在以下内容：
+
+- `adaptiveqos/smfenforcer/`。
+- `-core-mode smf`。
+- SMF QoS Flow 释放请求。
+- N1 NAS QoS Rule 生成。
+- 通过 GTP-U 自定义扩展头向 gNB 传输 QoS JSON。
+
+因此，不能把外部 SMF 的成功记录表述成“当前 Target 已经完整支持真实基站”。
+
+## 3. 当前基站能力结论
+
+对当前封闭厂商 BBU 的实际检查结果：
+
+| 能力 | 结果 | 结论 |
+| --- | --- | --- |
+| `POST /api/v1/qos/update` | 端口 80 返回 404 | 不可使用 gNB HTTP 路径 |
+| OAM CGI | 提供小区/网络级静态配置 | 不适合 per-UE、per-QFI 实时修改 |
+| DU 内部接口 | 厂商私有二进制协议 | 不作为项目集成接口 |
+| NGAP SCTP 38412 | gNB 已与 AMF 建联 | 当前唯一合适的动态 QoS 控制路径 |
+| PDU Session Resource Modify | 已处理成功 | 已验证可以建立 DRB |
+
+当前基站应使用：
+
+```text
+QoSModule -> SMF -> AMF -> gNB
 ```
-                    ┌─ ranapi.Client      (gNB-HTTP /api/v1/qos/update)  ← 保留原样
-Intent+Decision ──► RouterEnforcer ─┤
-                    └─ smfenforcer        (NGAP via SMF→AMF→gNB)        ← 新增,隔离
+
+而不是：
+
+```text
+QoSModule -X-> gNB HTTP
+UPF -X-> gNB 控制接口
+GTP-U 扩展头 -X-> gNB 调度器 JSON
 ```
 
-### 4.1 gNB-HTTP 路径(保留,原样)
+## 4. 三条路径对比
 
-- Enforcer:`ranapi.Client`(`client.go:108`),不动
-- 线缆:`ranapi.Request`(rnti/qfi/mcs/rb/bler/burst/mbr/gbr + mask),不动,**不加 5QI**
-- `mask`/`AutomaticMask`(`client.go:276`)逻辑保留
-- 适用:支持 `/api/v1/qos/update` 的基站
+### 4.1 gNB HTTP 路径
 
-### 4.2 NGAP 路径(新增,隔离)
+```text
+Target -> ranapi.Client -> POST /api/v1/qos/update -> gNB
+```
 
-- 新增包 `adaptiveqos/smfenforcer/`,实现 `Enforcer` 接口
-- **5QI 派生关在 NGAP Enforcer 内**:由 `Decision.PDBMS` 或 `ServiceInfo.service_type`→5QI 映射得出,**不改 `QoSValues`/`policy.go`**
-- **SUPI 解析关在 NGAP Enforcer 内**:由 `Intent.Flow.UEAddress`(UE IP)调 AMF `GET /namf-oam/v1/registered-ue-context` 反查 SUPI + pduSessionId;或用 `SEID` 映 SMF SM context
-- 调 SMF 自定义端点(或 PCF PolicyAuthorization),详见 §6
-- 适用:当前封闭基站
+特点：
 
-### 4.3 RouterEnforcer(新增,分发)
+- 已实现、已通过 Mock RAN 测试。
+- 使用 `rnti + q_qfi` 定位 RAN 内部 QoS Flow。
+- 可以携带 MBR、GBR、PDB、MCS、RB、BLER、smooth 和 burst 信息。
+- 仅适用于明确实现该私有接口的 gNB。
 
-- 持有 `ranEnforcer` + `ngapEnforcer` + `mode`
-- `mode`:
-  - `ran` → 只走 gNB-HTTP(其他基站)
-  - `ngap` → 只走 NGAP(当前基站)
-  - `auto` → 优先 gNB-HTTP,不可达/REJECTED 则 fallback NGAP(不确定基站能力)
-- `QoSHandler` 改成装配 `RouterEnforcer`(替换单一 `ranClient`)
+### 4.2 AF/PCF 路径
 
-### 4.4 字段归属与冲突避免
+```text
+Target -> afenforcer -> PCF -> SMF -> AMF -> gNB
+```
 
-单模式(`ran`/`ngap`)各自完整下发,无重叠。`auto` 互斥(同一请求只走一条),无冲突。
-若未来要"NGAP 建 QoS flow + gNB-HTTP 叠加 RAN-internal"互补模式(`split`),用现有 `mask` 切分:NGAP 下发 QFI/5QI/MBR/GBR/ARP,gNB-HTTP 的 mask 只勾 `dl/ul_max_mcs/rb/bler/smooth`+`burst_info`,不勾 `qfi/mbr/gbr/pri/cap/vul/pdb` → 不重叠。
+已经验证：
 
----
+- AF 请求符合真实 PCF 的 `AppSessionContextReqData`。
+- PCF 返回 201，并成功通知 SMF。
+- SMF 可以解析 SDF Flow Description。
 
-## 5. 配置(双模切换)
+未跑通原因：
 
-复用现有 `-config`(JSON 文件)与 `QOS_*` 环境变量机制,加 `core.mode`:
+- stock SMF 在 `ApplyPccRules` 出现 nil `QosData` panic。
+- fork SMF 修复 panic 后又出现 `Duplicate URR creation`。
+- PFCP 和 N1N2 未能稳定继续到 gNB。
+
+该路径保留用于后续兼容或 free5GC 修复验证，但不作为当前基站的推荐部署路径。
+
+### 4.3 SMF 外挂路径
+
+```text
+QoSModule
+  -> POST /nsmf-oam/v1/qos-update
+  -> SMF 根据 UE IP 查找 SM Context
+  -> AddQosFlow + 创建 QER
+  -> PFCP Session Modification -> UPF
+  -> N1N2 Message Transfer -> AMF
+  -> PDU Session Resource Modify -> gNB
+```
+
+该路径绕开 PCF 生成 PCC Rule 后进入 `ApplyPccRules` 的问题链路，直接复用 SMF 内部已工作的 QoS Flow 修改流程。
+
+## 5. 已验证的 SMF 接口
+
+### 5.1 请求
+
+```http
+POST /nsmf-oam/v1/qos-update
+Content-Type: application/json
+```
 
 ```json
 {
-  "ran": { "endpoint": "http://<gNB>:<port>/api/v1/qos/update", "timeout": "3s", "mask": "auto" },
-  "core": {
-    "mode": "ngap",
-    "smf_endpoint": "http://smf.free5gc.org:8000",
-    "amf_endpoint": "http://amf.free5gc.org:8000",
-    "timeout": "5s"
+  "ue_ip": "10.60.0.1",
+  "qfi": 5,
+  "five_qi": 2,
+  "mbr_ul": "9600000 bps",
+  "mbr_dl": "24000000 bps",
+  "gbr_ul": "100000 bps",
+  "gbr_dl": "100000 bps",
+  "arp": {
+    "priority": 8,
+    "preempt_cap": "MAY_PREEMPT",
+    "preempt_vuln": "NOT_PREEMPTABLE"
   }
 }
 ```
 
-- 当前基站:`core.mode = "ngap"`
-- 其他基站:`core.mode = "ran"`
-- 不确定:`core.mode = "auto"`
+注意：bitrate 必须同时携带数值和单位，例如 `9600000 bps`。外部 SMF 处理器依赖该格式进行换算。
 
-env:`QOS_CORE_MODE`、`QOS_CORE_SMF_ENDPOINT`、`QOS_CORE_AMF_ENDPOINT` 覆盖文件;flag `-core-mode`/`-core-url` 最高优先级。优先级:flag > env > file > 默认。
+### 5.2 响应
 
----
+成功验证时 SMF 返回 HTTP 200，业务状态为 `ACCEPTED`，并携带 `N1_N2_TRANSFER_INITIATED` 原因。
 
-## 6. NGAP 路径方案选择(PCF/AF 外挂,已定)
+QoSModule 接入时不能把不同下游的原始响应直接透传给 MASQUE。应统一转换为：
 
-经 §2 确认当前基站只能走 NGAP。NGAP 经核心网有三种外挂,对比后**选定 PCF/AF 外挂**(方案 C):
-
-| 维度 | A. AMF 外挂 | B. SMF 外挂 | **C. PCF/AF 外挂(已选)** |
-|---|---|---|---|
-| 路径 | QoS模块→AMF→gNB(2 段) | QoS模块→SMF→AMF→gNB(3 段) | QoS模块(AF)→PCF→SMF→AMF→gNB(4 段) |
-| 改 NF | AMF(已自建) | SMF(需重建) | **0 改动**(stock PCF 原生) |
-| 端到端 | ⚠️ 仅 gNB DRB,UPF/UE 不配 → 不生效 | ✅ 全配 | ✅ 全链 |
-| 标准 | 非标准 | 标准 | 标准(AF 驱动) |
-
-- **不选 AMF**:只配 gNB,UPF/UE 不配,突发保障不生效
-- **不选 SMF**:端到端好且 SMF 内查 UE IP(免静态表),但需重建 SMF 镜像;源码在 `base/free5gc/NFs/smf`、Dockerfile 在 `nf_smf/Dockerfile.ac`,仍是核心网改动
-- **选 PCF/AF**:0 核心网改动,改动全在 QoS 模块(唯一要改的仓库 `acore2026/QoSModule`,已同步 + SSH 可推)。代价:AF SBI 比 SMF HTTP 复杂、需静态 UE IP→SUPI 表、需 SDF
-- 远端 `free5GC动态QoS改造方案总结.md` 推荐短期 SMF、长期 PCF/AF;本次经修改量对比(§6.2)后选 PCF/AF,因 0 NF 改动 + QoS 模块仓库就绪可推
-
-### NGAP Enforcer 最小必填字段(基于实际代码)
-
-| 必填 | 来源 | 现有代码是否有 |
-|---|---|---|
-| SUPI | `Intent.Flow.UEAddress`(UE IP)→SMF 解析 / `SEID` | △ 需 enforcer 内解析,详见 §6.1 |
-| pduSessionId | SUPI 解析 / `SEID` 映 SMF | △ 需 enforcer 内解析 |
-| QFI | `Intent.Flow.QFI` | ✅ |
-| 5QI | `Decision.PDBMS`/`ServiceInfo` 派生 | △ enforcer 内派生(不入 model) |
-| ARP pri/cap/vuln | `Decision.Priority` + `ranapi.RequestDefaults`(QCap/QVul) | △ cap/vuln 需从 defaults 带入 enforcer |
-| MBR-UL/DL、GBR-UL/DL | `Decision.MBRULKbps/DL`、`Decision.GBRULKbps/DL` | ✅(单位 kbps↔NGAP BitRate 换算) |
-
-gNB-HTTP 路径独有的 `mcs/rb/bler/smooth/burst`/`rnti` **NGAP 不带**,这些只在 gNB-HTTP 线缆格式里,NGAP Enforcer 不用。
-
-### 6.1 寻址 key 分流(RNTI vs UE IP vs SUPI,无需硬转换)
-
-RNTI 和 SUPI 分属不同域,**没有直接映射表**:
-
-| 标识 | 谁分配 | 谁认 | 域 |
-|---|---|---|---|
-| C-RNTI | gNB MAC(RRC 接入时) | **只有 gNB 认** | 空口/gNB 内部 |
-| SUPI | USIM/UDM | AMF/SMF/PCF | 核心网 |
-| UE IP | SMF(PDU session) | SMF、UPF(PDR) | 核心网用户面 |
-| SEID | SMF/UPF(PFCP) | SMF、UPF | N4 |
-
-C-RNTI↔RAN UE NGAP ID 映射**只在 gNB 内部**,不暴露;AMF 只认 SUPI/GUTI/RAN UE NGAP ID,**不认 C-RNTI**。所以**从核心侧查不到 RNTI→SUPI**。
-
-**结论:不要硬转 RNTI→SUPI,每条路径用它自己的寻址 key:**
-
-| 路径 | 寻址 key | key 来源 | 定位方式 |
-|---|---|---|---|
-| gNB-HTTP | **RNTI** | 请求 `rnti` | gNB 内部认 |
-| UPF 自适应 | **UE IP**(或 SEID) | `Intent.Flow.UEAddress`/`SEID` | UPF 按 UE IP 匹配 PDR `UEIPv4`→session(`adaptive_qos.go:1366` `resolveAdaptiveSessionLocked`)。**无需 SUPI** |
-| SMF 外挂 | **UE IP** 或 **SEID** | `Intent.Flow.UEAddress`/`SEID` | SMF 持有 UE IP↔PDU session↔SUPI,解析出 SUPI+pduSessionId |
-| AMF 外挂 | **SUPI** | 经 SMF 解析,或请求带 | AMF 按 SUPI→RAN UE NGAP ID |
-
-PCF/AF 经静态表的转换流程:
-```
-QoS 模块(带 UEAddress=UE IP)
-   ├─► 静态表:UE IP → SUPI(配置在 QoS 模块)
-   ├─► 组装 AF AppSession:SUPI + DNN/slice(配置)+ SDF(masqueapi.PacketFilter)+ 5QI=2 + MBR/GBR(Decision)+ ARP(preemptCap=1)
-   └─► PCF POST /npcf-policyauthorization/v1/app-sessions → PCF 建 PCC rule → 通知 SMF → N1N2 → AMF → gNB
+```json
+{
+  "request_id": "req-001",
+  "status": "ACCEPTED",
+  "message": "N1/N2 QoS modification initiated"
+}
 ```
 
-你模块的 `Intent.Flow.UEAddress`(来自 `masqueapi.SourceAddress`——MASQUE 代理在 UE 数据路径上看得到 UE 源 IP,handler 用 `ClientIP` 兜底)和 `masqueapi.PacketFilter`(SDF)已备好,SUPI 由静态表查,**不需要新增 RNTI→SUPI 硬转换**。
+失败时建议增加稳定的 `error_code`，例如 `UE_SESSION_NOT_FOUND`、`SMF_UNAVAILABLE` 或 `N1N2_REJECTED`。
 
-> 若上游只给 RNTI、不给 UE IP:RNTI 在核心侧**无法解析**(无 gNB 配合查不到)。解法:让 MASQUE 代理在请求里带 `source_address`(`masqueapi` 已有该字段),由 UE IP 作为跨域桥梁。
+## 6. 字段映射
 
-### 6.2 修改量对比(SMF vs PCF/AF,源码实证)
+| QoSModule 字段 | SMF 请求 | 说明 |
+| --- | --- | --- |
+| `Intent.Flow.UEAddress` | `ue_ip` | SMF 用 UE IP 查找 PDU Session |
+| `Intent.Flow.QFI` | `qfi` | 指定 QoS Flow |
+| 配置或业务映射 | `five_qi` | 当前验证值为 2 |
+| `Decision.MBRULKbps` | `mbr_ul` | 乘 1000 后格式化为 `bps` 字符串 |
+| `Decision.MBRDLKbps` | `mbr_dl` | DL 缺失时需要与 SMF 接口约定省略行为 |
+| `Decision.GBRULKbps` | `gbr_ul` | 乘 1000 后格式化为 `bps` 字符串 |
+| `Decision.GBRDLKbps` | `gbr_dl` | DL 缺失时需要与 SMF 接口约定省略行为 |
+| 配置 | `arp` | 当前验证使用优先级 8、可抢占、不可被抢占 |
 
-| 维度 | B. SMF 外挂 | **C. PCF/AF 外挂(已选)** |
-|---|---|---|
-| 核心网改动 | SMF 加端点(`api_oam.go` 加路由 + `GetSMContextByPDUAddress`(`sm_context.go` 加 ~20 行,`smContextPool` `:26` Range 匹配 `PDUAddress` `:137`)+ `HandleOAMQoSUpdate` ~150-250 行,接既有 `applySmPolicyDecision`/PFCP/N1N2)+ 重建 SMF 镜像 | **0** |
-| QoS 模块改动 | `smfenforcer` ~150 行(简单 HTTP/JSON) | `afenforcer` ~300-400 行(AF SBI + 静态表 + SDF + app-session 生命周期) |
-| UE IP→SUPI | SMF 内查(字段已有) | 静态表(QoS 模块配) |
-| SDF | 不强需(按 QFI/session) | 必需(`masqueapi.PacketFilter`) |
-| 总修改量 | ~500 行(SMF+模块) | ~500 行(全在模块) |
-| 复杂度分布 | 分散,每块简单 | 集中在 QoS 模块(AF SBI 重) |
+标识分工：
 
-两方案总量相近;选 PCF/AF 因 **0 NF 改动 + QoS 模块仓库就绪可推**。SMF 方案作为备选(若后续接受重建 SMF,可换用以省静态表)。
+| 标识 | 使用者 | 用途 |
+| --- | --- | --- |
+| RNTI | gNB 内部、gNB HTTP 私有路径 | 不用于 SMF 寻址 |
+| UE IP | SMF、UPF | SMF 外挂路径的会话查找键 |
+| SUPI | AMF、SMF、PCF | AF/PCF 路径使用静态 UE IP→SUPI 映射 |
+| QFI | UE、SMF、UPF、gNB | 标识 QoS Flow |
 
-### 6.3 仓库同步与推送能力(方案 C)
+RNTI 与 SUPI 不存在可由 QoSModule 直接查询的通用映射，不应尝试硬转换。
 
-方案 C 只改 QoS 模块,核心网 0 改动。各仓库状态:
+## 7. QoSModule 待实现改造
 
-| 仓库 | 远端 | 同步 | 可推 | 方案C改? |
-|---|---|---|---|---|
-| **QoSModule**(唯一改) | `acore2026/QoSModule`(SSH) | 0/0 干净 | ✅ SSH | ✅ |
-| PCF 源(`base/free5gc/NFs/pcf`) | `acore2026/free5gc`(HTTPS) | 0/0 | — | ❌ 不改不重建 |
-| AMF(`nf_amf/amf`) | `acore2026/amf`(SSH) | 0/0 干净 | ✅ | ❌ |
-| free5gc-compose(部署) | `acore2026/free5gc-compose`(SSH) | 0/0 | ✅ | ❌(仅切镜像标签时改 compose) |
+### 7.1 新增 `smfenforcer`
 
-PCF 容器 stock `free5gc/pcf:v4.2.1`,不改不重建。改动可全部推回 `acore2026/QoSModule`。
+新增 `adaptiveqos/smfenforcer/`，实现现有接口：
 
----
+```go
+type Enforcer interface {
+    Apply(context.Context, Intent, Decision) (ApplyResult, error)
+}
+```
 
-## 7. 当前模块是否支持 + 需补什么
+职责包括：
 
-| 能力 | 现状 | 要补 |
-|---|---|---|
-| gNB-HTTP 下发(`ranapi.Client`) | ✅ 已有 | 无,原样保留 |
-| NGAP 下发(PCF/AF) | ❌ 没有 | 新增 `afenforcer`(AF→PCF `Npcf_PolicyAuthorization`) |
-| 按基站切换(双模) | ❌ `QoSHandler` 只绑一个 enforcer | 新增 `RouterEnforcer`,装配进 `qos_handler.go` |
-| `mode` 配置 | ❌ | 加 `core.mode`(flag/env/file) |
-| UE IP→SUPI | ❌ | 静态表配置(默认 5QI=2、ARP preemptCap=1) |
-| SDF 透传 | △ `masqueapi.PacketFilter` 有,`Intent` 未带 | `Intent` 透传 `PacketFilter`(给 AF 用) |
-| 突发 end 拆 flow | ❌ | `afenforcer` 按 burst duration 调度 terminate app-session |
+1. 校验 UE IP、QFI 和上下行速率。
+2. 把 kbps 转换成带 `bps` 单位的字符串。
+3. 构造 SMF 请求并设置超时。
+4. 解析 HTTP 状态和业务状态。
+5. 转换成统一 `ApplyResult`，不泄漏 SMF 私有响应格式。
 
-改动范围:**只动 QoSModule,核心网 0 改动**(PCF stock 不碰)。
+### 7.2 明确路由模式
 
----
+建议将模式扩展为：
 
-## 8. 落地顺序(对齐远端 `free5GC动态QoS改造方案总结.md` 分阶段)
+| 模式 | Enforcer |
+| --- | --- |
+| `ran` | gNB HTTP |
+| `pcf` | AF/PCF |
+| `smf` | SMF 外挂 |
+| `auto` | 按明确配置的顺序回退 |
 
-1. **阶段1 MASQUE 联调(Mock RAN)**——已完成(`cmd/mockran`,`71ec1ab`):验证收包/`CLIENT-IP` 解析/字段校验/动态 QoS 计算/RAN 请求体构造/重传缓存
-2. **阶段2 AF Enforcer + Mock PCF 联调**:实现 `afenforcer`,先用 mock PCF 验证 AppSession 请求体(SUPI 静态表查、5QI=2、MBR/GBR、ARP preemptCap=1、SDF 转换)
-3. **阶段3 真 PCF 联调**:指向 `pcf.free5gc.org:8000`,PCF→SMF→AMF→gNB 全链,验证突发 GBR flow 生效
-4. **阶段4 真实 RAN 联调**:验证 gNB 收到 `PDUSessionResourceModify`、QoS flow 生效、视频码率/时延/丢包/MOS 变化、失败路径可定位
-5. 全程实现 `RouterEnforcer` 双模:`mode=ngap` 走 AF、`mode=ran` 走 gNB-HTTP、`mode=auto` 优先 ran 失败回退 ngap
+当前 `ngap` 名称同时容易被理解为“直接 NGAP”，应迁移为更准确的 `pcf`，并为旧参数保留兼容别名。
 
-gNB-HTTP 路径(`ranapi.Client`/`ranapi.Request`/`mask`)全程不改,保证其他基站继续可用。
+### 7.3 补充释放流程
 
----
+当前 SMF 外挂接口只增加或修改 QoS Flow，没有释放语义。需要增加以下一种能力：
 
-## 附:5QI 参考映射(供 NGAP Enforcer 派生)
+- 同一接口增加 `operation: release`。
+- 新增 `/nsmf-oam/v1/qos-release`。
+- 使用具有明确生命周期的策略控制对象。
 
-| 5QI | PDB | 类型 | 典型业务 |
-|---|---|---|---|
-| 1 | 100ms | GBR | 语音会话 |
-| 2 | 150ms | GBR | 视频会话 |
-| 5 | 100ms | non-GBR | IMS 信令 |
-| 7 | 100ms | non-GBR | 语音/视频/交互 |
-| 9 | 300ms | non-GBR | 默认 Internet |
+burst 到期后的恢复应由 QoSModule/SMF 发起标准 QoS Flow 修改或释放，不应要求 gNB 从自定义 burst 字段启动本地定时器。
 
-> 注:PDB→5QI 反推有歧义(100ms 对应 5QI=1/5/7…),NGAP Enforcer 应优先用 `ServiceInfo.service_type` 映射,否则按 GBR/non-GBR + PDB 选标准化 5QI。
+### 7.4 补充 N1 和用户面验证
+
+当前真实验证确认了 N2 和 DRB 建立，但仍需：
+
+- 补充 UE 侧 N1 NAS QoS Rule，验证 UL 流量分类。
+- 验证 UPF 下行流量是否按新 QFI 标记。
+- 在拥塞环境中测量 UL/DL GBR、时延、丢包和视频体验。
+
+## 8. 验证结果
+
+外部 SMF 路径已经观察到：
+
+| 环节 | 结果 |
+| --- | --- |
+| SMF QoS 接口 | HTTP 200，`ACCEPTED` |
+| SMF→UPF PFCP | Session Modification 请求和响应成功 |
+| SMF→AMF N1N2 | AMF 接收并返回成功 |
+| AMF→gNB NGAP | gNB 返回 PDU Session Resource Modify Response |
+| gNB DRB | 建立 DRB 5，对应 QFI 5、5QI 2 |
+
+详细证据见《方案 A：SMF 外挂实现与验证》。
+
+## 9. 实施顺序
+
+1. 在本仓库实现 `smfenforcer` 和单元测试。
+2. 增加 `smf` 模式并保持 `ran` 路径兼容。
+3. 使用 Mock SMF 验证请求映射、错误转换和超时。
+4. 接入外部 fork SMF，复测 PFCP、N1N2、NGAP 和 DRB。
+5. 增加 QoS Flow 释放和 N1 NAS QoS Rule。
+6. 完成真实视频和拥塞场景验收后，再将 SMF 路径标记为生产可用。
