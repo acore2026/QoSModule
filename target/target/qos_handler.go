@@ -13,6 +13,7 @@ import (
 	"github.com/acore2026/adaptive-qos/masqueapi"
 	"github.com/acore2026/adaptive-qos/ranapi"
 	"github.com/acore2026/adaptive-qos/routerenforcer"
+	"github.com/acore2026/adaptive-qos/udpranenforcer"
 )
 
 type QoSConfig struct {
@@ -24,10 +25,12 @@ type QoSConfig struct {
 	HTTPClient  *http.Client
 	Logger      *log.Logger
 
-	// CoreMode routes enforcement: "ran" → gNB-HTTP, "ngap" → AF/PCF, "auto" → ran then ngap.
+	// CoreMode routes enforcement: "ran" → gNB-HTTP, "ran-udp" → gNB-UDP, "ngap" → AF/PCF, "auto" → ran then ngap.
 	CoreMode string
 	// AFConfig configures the AF/PCF enforcer used when CoreMode is ngap/auto.
 	AFConfig afenforcer.Config
+	// UDPRANConfig configures the UDP RAN enforcer used when CoreMode is ran-udp/auto.
+	UDPRANConfig udpranenforcer.Config
 }
 
 type QoSHandler struct {
@@ -72,22 +75,36 @@ func NewQoSHandler(cfg QoSConfig) (*QoSHandler, error) {
 		afEnforcer = afenforcer.New(afCfg)
 	}
 
+	// UDP RAN enforcer. Built when the mode needs it and UDP endpoint is set.
+	var udpRanEnforcer adaptiveqos.Enforcer
+	if (mode == routerenforcer.ModeRanUDP || mode == routerenforcer.ModeAuto) && cfg.UDPRANConfig.Endpoint != "" {
+		udpCfg := cfg.UDPRANConfig
+		if udpCfg.Logger == nil {
+			udpCfg.Logger = cfg.Logger
+		}
+		udpRanEnforcer = udpranenforcer.New(udpCfg)
+	}
+
 	switch mode {
 	case routerenforcer.ModeRAN:
 		if ranEnforcer == nil {
 			return nil, errors.New("ran mode selected but RAN endpoint is empty")
+		}
+	case routerenforcer.ModeRanUDP:
+		if udpRanEnforcer == nil {
+			return nil, errors.New("ran-udp mode selected but UDP RAN endpoint is empty")
 		}
 	case routerenforcer.ModeNGAP:
 		if afEnforcer == nil {
 			return nil, errors.New("ngap mode selected but AF PCF endpoint is empty")
 		}
 	case routerenforcer.ModeAuto:
-		if ranEnforcer == nil && afEnforcer == nil {
-			return nil, errors.New("auto mode needs at least one of RAN endpoint or AF PCF endpoint")
+		if ranEnforcer == nil && udpRanEnforcer == nil && afEnforcer == nil {
+			return nil, errors.New("auto mode needs at least one of RAN / UDP RAN / AF PCF endpoint")
 		}
 	}
 
-	router := routerenforcer.New(ranEnforcer, afEnforcer, mode)
+	router := routerenforcer.New(ranEnforcer, udpRanEnforcer, afEnforcer, mode)
 	return &QoSHandler{
 		processor: &adaptiveqos.Processor{
 			Policy:         adaptiveqos.NewBurstPolicy(cfg.Policy),

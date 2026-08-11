@@ -16,6 +16,7 @@ import (
 	adaptiveqos "github.com/acore2026/adaptive-qos"
 	"github.com/acore2026/adaptive-qos/afenforcer"
 	"github.com/acore2026/adaptive-qos/ranapi"
+	"github.com/acore2026/adaptive-qos/udpranenforcer"
 	target "masque-target"
 )
 
@@ -33,6 +34,8 @@ func main() {
 	var coreMode, pcfEndpoint, supiMap, defaultDNN string
 	var defaultFiveQI, arpPriority uint
 	var arpPreemptCap, arpPreemptVuln uint
+	var ranUDPEndpoint string
+	var ranUDPAck bool
 
 	flag.StringVar(&configPath, "config", "", "reliability config JSON file")
 	flag.StringVar(&bind, "b", "0.0.0.0:7400", "bind UDP listen address")
@@ -64,6 +67,8 @@ func main() {
 	flag.UintVar(&arpPriority, "arp-priority", 3, "ARP priority level")
 	flag.UintVar(&arpPreemptCap, "arp-preempt-cap", 1, "ARP pre-emption capability (1=may preempt)")
 	flag.UintVar(&arpPreemptVuln, "arp-preempt-vuln", 0, "ARP pre-emption vulnerability (1=preemptable)")
+	flag.StringVar(&ranUDPEndpoint, "ran-udp-endpoint", "", "gNB UDP QoS endpoint (for ran-udp mode), e.g. 10.88.120.212:54003")
+	flag.BoolVar(&ranUDPAck, "ran-udp-ack", false, "whether the gNB UDP interface returns a reply")
 	flag.Parse()
 
 	var logger *log.Logger
@@ -110,6 +115,13 @@ func main() {
 			afCfg.SUPIMap = parseSUPIMap(supiMap)
 		}
 
+		udpRanCfg := udpranenforcer.Config{
+			Endpoint:   ranUDPEndpoint,
+			Timeout:    ranTimeout,
+			Defaults:   ranDefaults,
+			WaitForAck: ranUDPAck,
+		}
+
 		qosHandler, err := target.NewQoSHandler(target.QoSConfig{
 			RANEndpoint: ranEndpoint,
 			RANTimeout:  ranTimeout,
@@ -118,6 +130,7 @@ func main() {
 			Logger:      logger,
 			CoreMode:    coreMode,
 			AFConfig:    afCfg,
+			UDPRANConfig: udpRanCfg,
 		})
 		if err != nil {
 			log.Fatalf("configure QoS handler: %v", err)
