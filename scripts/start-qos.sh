@@ -35,7 +35,7 @@ RAN_URL="${RAN_URL:-http://10.88.120.212:80/api/v1/qos/update}"
 
 # ---- mode=ran-udp(UDP 直连 gNB) ----
 RAN_UDP_ENDPOINT="${RAN_UDP_ENDPOINT:-10.88.0.3:9999}"  # gNB UDP 地址
-RAN_UDP_ACK="${RAN_UDP_ACK:-0}"                          # gNB 是否回应答(0=不等,1=等)
+RAN_UDP_ACK="${RAN_UDP_ACK:-1}"                          # gNB 是否回应答(0=不等,1=等)
 
 # ---- mode=ngap(经核心网,以下才需要) ----
 SMF_IP="${SMF_IP:-10.100.200.5}"          # SMF 容器 IP;restart-all 后可能变
