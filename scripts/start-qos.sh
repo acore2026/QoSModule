@@ -12,22 +12,32 @@ set -e
 #        若连不上,运行 docker inspect <nf> --format '{{...IPAddress}}' 查新 IP
 # ============================================================
 
-# ---- 默认地址(按需修改这里) ----
-QOS_BIND="${QOS_BIND:-0.0.0.0:7400}"
+# ============================================================
+#  默认地址(按需修改这里)
+#
+#  各模式需要的 IP:
+#    ran      → QOS_BIND + RAN_URL
+#    ran-udp  → QOS_BIND + RAN_UDP_ENDPOINT (+ RAN_UDP_ACK)
+#    ngap     → QOS_BIND + SMF_IP + SUPI_MAP (+ DEFAULT_5QI/DNN)
+#    auto     → 以上全部(HTTP→UDP→NGAP 依次回退)
+# ============================================================
 
-# gNB(HTTP / UDP 直连)
+# ---- 公共(所有模式) ----
+QOS_BIND="${QOS_BIND:-0.0.0.0:7400}"           # QoS 模块 UDP 监听(收 MASQUE 请求)
+
+# ---- mode=ran(HTTP 直连 gNB) ----
 RAN_URL="${RAN_URL:-http://10.88.120.212:80/api/v1/qos/update}"
-RAN_UDP_ENDPOINT="${RAN_UDP_ENDPOINT:-10.88.0.3:9999}"
-RAN_UDP_ACK="${RAN_UDP_ACK:-0}"
 
-# 核心网(NGAP 经 SMF 方案A / 或 PCF 方案B)
-SMF_IP="${SMF_IP:-10.100.200.5}"          # docker inspect smf 查;restart-all 后可能变
-PCF_IP="${PCF_IP:-10.100.200.12}"          # docker inspect pcf 查;restart-all 后可能变
+# ---- mode=ran-udp(UDP 直连 gNB) ----
+RAN_UDP_ENDPOINT="${RAN_UDP_ENDPOINT:-10.88.0.3:9999}"  # gNB UDP 地址
+RAN_UDP_ACK="${RAN_UDP_ACK:-0}"                          # gNB 是否回应答(0=不等,1=等)
+
+# ---- mode=ngap(经核心网,以下才需要) ----
+SMF_IP="${SMF_IP:-10.100.200.5}"          # SMF 容器 IP;restart-all 后可能变(docker inspect smf 查)
 SMF_ENDPOINT="${SMF_ENDPOINT:-http://${SMF_IP}:8000}"
+PCF_IP="${PCF_IP:-10.100.200.12}"          # PCF 容器 IP(方案B 才用)
 PCF_ENDPOINT="${PCF_ENDPOINT:-http://${PCF_IP}:8000/npcf-policyauthorization/v1/app-sessions}"
-
-# UE 映射(ngap 模式,静态 UE IP→SUPI)
-SUPI_MAP="${SUPI_MAP:-10.60.0.1=imsi-001012345678903}"
+SUPI_MAP="${SUPI_MAP:-10.60.0.1=imsi-001012345678903}"   # UE IP→SUPI(ngap 才需要)
 DEFAULT_5QI="${DEFAULT_5QI:-2}"
 DEFAULT_DNN="${DEFAULT_DNN:-internet}"
 # ---- 默认地址结束 ----
