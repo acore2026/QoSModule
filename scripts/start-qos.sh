@@ -52,7 +52,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TARGET_DIR="$SCRIPT_DIR/../target/target"
 BINARY="$TARGET_DIR/target"
 PID_FILE="/tmp/qos-module.pid"
-LOG_FILE="/tmp/qos-module.log"
+LOG_FILE="$SCRIPT_DIR/../logs/qos-module.log"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; BLUE='\033[0;34m'; YELLOW='\033[1;33m'; NC='\033[0m'
 ok()   { echo -e "${GREEN}  ✓ $1${NC}"; }
@@ -198,6 +198,7 @@ case "$MODE" in
 esac
 
 # 后台启动(nohup + PID 文件)
+mkdir -p "$(dirname "$LOG_FILE")"
 echo "=========================================="
 echo "  QoS 模块启动 (mode=$MODE,后台)"
 echo "=========================================="

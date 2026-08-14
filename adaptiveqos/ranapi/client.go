@@ -205,6 +205,8 @@ func BuildRequest(intent adaptiveqos.Intent, decision adaptiveqos.Decision, defa
 	} else {
 		request.Mask = AutomaticMask(request)
 	}
+	// RNTI mask 位固定为 0:即使客户端提供了 rnti,也不向 gNB 下发 RNTI 处理标志
+	request.Mask &^= MaskBitRNTI
 	return request
 }
 

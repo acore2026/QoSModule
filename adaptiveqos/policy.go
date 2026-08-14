@@ -60,15 +60,30 @@ func (p *BurstPolicy) Generate(_ context.Context, intent Intent, limits Limits) 
 		dlTransit = p.transitDelay(intent.DLTransitDelayMS, intent.E2EDelayMS)
 	}
 
+	// GBR = burst_size / burst_duration  (average rate of the burst — the
+	// rate the network must guarantee to carry the data over its duration).
+	// MBR = burst_size / e2e_delay        (peak rate needed to deliver the
+	// entire burst within the end-to-end delay budget; >= GBR when
+	// burst_duration >= e2e_delay, which holds for typical streaming
+	// traffic where the burst is spread over seconds but e2e is ~160 ms).
 	target := QoSValues{
-		MBRULKbps: rateKbps(intent.ULBurst.SizeKB, intent.ULBurst.DurationMS),
-		GBRULKbps: rateKbps(intent.ULBurst.SizeKB, ulTransit),
+		MBRULKbps: rateKbps(intent.ULBurst.SizeKB, intent.E2EDelayMS),
+		GBRULKbps: rateKbps(intent.ULBurst.SizeKB, intent.ULBurst.DurationMS),
 		PDBMS:     pdbFromBudget(intent.E2EDelayMS, p.cfg.DefaultPDBMS),
 		Priority:  p.cfg.Priority,
 	}
 	if intent.DLBurst.Complete() {
-		target.MBRDLKbps = rateKbps(intent.DLBurst.SizeKB, intent.DLBurst.DurationMS)
-		target.GBRDLKbps = rateKbps(intent.DLBurst.SizeKB, dlTransit)
+		target.MBRDLKbps = rateKbps(intent.DLBurst.SizeKB, intent.E2EDelayMS)
+		target.GBRDLKbps = rateKbps(intent.DLBurst.SizeKB, intent.DLBurst.DurationMS)
+	}
+	// 3GPP requires MBR >= GBR. When burst_duration < e2e_delay (e.g. a
+	// short, dense burst), GBR would exceed MBR. Raise MBR to GBR so the
+	// guaranteed rate never surpasses the maximum.
+	if target.GBRULKbps > target.MBRULKbps {
+		target.MBRULKbps = target.GBRULKbps
+	}
+	if target.GBRDLKbps > target.MBRDLKbps {
+		target.MBRDLKbps = target.GBRDLKbps
 	}
 
 	applied := QoSValues{
@@ -80,6 +95,14 @@ func (p *BurstPolicy) Generate(_ context.Context, intent Intent, limits Limits) 
 	if intent.DLBurst.Complete() {
 		applied.MBRDLKbps = limits.MBRDL.Clip(target.MBRDLKbps)
 		applied.GBRDLKbps = limits.GBRDL.Clip(target.GBRDLKbps)
+	}
+	// Re-check after clipping: independent range clipping could lower MBR
+	// below the separately clipped GBR.
+	if applied.GBRULKbps > applied.MBRULKbps {
+		applied.MBRULKbps = applied.GBRULKbps
+	}
+	if applied.GBRDLKbps > applied.MBRDLKbps {
+		applied.MBRDLKbps = applied.GBRDLKbps
 	}
 
 	return Decision{

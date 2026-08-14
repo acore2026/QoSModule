@@ -58,7 +58,7 @@ func TestQoSHandlerAppliesPolicyAndReturnsRANResponse(t *testing.T) {
 	if received.QMBRUL != 81920 || received.QMBRDL != 163840 {
 		t.Fatalf("unexpected RAN MBR: ul=%d dl=%d", received.QMBRUL, received.QMBRDL)
 	}
-	if received.QGBRUL != 64000 || received.QGBRDL != 100000 {
+	if received.QGBRUL != 81920 || received.QGBRDL != 100000 {
 		t.Fatalf("unexpected RAN GBR: ul=%d dl=%d", received.QGBRUL, received.QGBRDL)
 	}
 	if received.QPDB != 100 || received.QPri != 3 {
