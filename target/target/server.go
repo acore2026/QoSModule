@@ -209,5 +209,5 @@ func (s *Server) logf(format string, args ...any) {
 }
 
 func NewLogger(w io.Writer) *log.Logger {
-	return log.New(w, "", log.LstdFlags)
+	return log.New(w, "", log.LstdFlags|log.Lmicroseconds)
 }
