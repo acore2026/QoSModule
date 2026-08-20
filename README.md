@@ -4,25 +4,23 @@ QoSModule 接收 MASQUE Proxy 转发的 UDP QoS 请求，将业务突发需求�
 
 ## 当前状态
 
-更新时间：2026-08-11。
+更新时间：2026-08-20。
 
 | 能力 | 状态 | 说明 |
 | --- | --- | --- |
 | MASQUE UDP Target | 已实现 | 解析 `CLIENT-IP`，支持可靠信封、去重缓存和原路回包 |
 | QoS 请求校验与策略计算 | 已实现 | UL 必选、DL 成对可选，按静态范围裁剪 |
 | gNB HTTP 下发 | 已实现 | `ranapi.Client` 调用 `POST /api/v1/qos/update`，适用于开放 gNB 和 Mock RAN |
-| AF/PCF 下发 | 已实现但不建议当前部署使用 | `afenforcer` 已适配真实 PCF 请求格式；真实链路受 free5GC PCF/SMF 问题阻塞 |
-| SMF 外挂下发 | 外部仓库已验证，本仓库未接入 | `acore2026/smf` 的 `/nsmf-oam/v1/qos-update` 已跑通至 gNB 并建立 DRB；本仓库尚无 `smfenforcer` |
+| SMF 外挂下发（方案 A） | 已实现并端到端验证 | `smfenforcer` 调用 fork SMF `/nsmf-oam/v1/qos-update`，经 PFCP/N1N2/NGAP 到 gNB 建 DRB |
+| AF/PCF 下发（方案 B） | 已移除 | 原 `afenforcer` 因 free5GC PCF/SMF 链路 panic/重复 URR 不通，已删除，由方案 A 取代 |
 | 直接发送 NGAP | 未实现，也不应由本模块直接实现 | NGAP 应由 AMF 向 gNB 发送 |
 | GTP-U 自定义扩展头传 QoS JSON | 未实现且不属于当前方案 | 当前基站通过标准 NGAP 接收 QoS 修改 |
 
 当前仓库实际支持的下发模式为：
 
 - `ran`：调用 gNB HTTP API。
-- `ngap`：调用 AF/PCF Enforcer，由核心网尝试触发 NGAP。该名称不表示 Target 直接发送 NGAP。
-- `auto`：先尝试 gNB HTTP，失败后回退 AF/PCF。
-
-已经验证成功的 SMF 外挂路径尚未装配到上述模式中，这是当前最主要的实现缺口。
+- `ngap`：调用 SMF OAM Enforcer（方案 A），由 SMF 经 AMF 触发 NGAP。该名称不表示 Target 直接发送 NGAP。
+- `auto`：先尝试 gNB HTTP，再 gNB UDP，失败后回退 SMF OAM（方案 A）。
 
 ## 代码结构
 
@@ -33,7 +31,7 @@ adaptiveqos/                     传输无关的策略模块
 ├── processor.go                 查询范围、计算、下发的编排
 ├── masqueapi/                   MASQUE JSON 适配器
 ├── ranapi/                      gNB HTTP Enforcer
-├── afenforcer/                  AF/PCF Enforcer
+├── smfenforcer/                 SMF OAM Enforcer (方案 A)
 └── routerenforcer/              ran、ngap、auto 路由
 
 target/target/                   MASQUE 后端 UDP 服务
@@ -80,7 +78,7 @@ go test ./...
 
 ## 下一步
 
-1. 在 `adaptiveqos` 中实现 `smfenforcer`，调用已验证的 SMF `/nsmf-oam/v1/qos-update`。
-2. 为 RouterEnforcer 增加明确的 `smf` 模式，避免继续用 `ngap` 混指 AF/PCF 与 SMF 两条路径。
-3. 统一 Enforcer 返回值为 MASQUE 侧的 `request_id/status/error_code/message`，不要原样透传不同下游协议。
-4. 补充 QoS Flow 释放接口和 N1 NAS QoS Rule，再进行用户面拥塞下的 UL/DL GBR 验证。
+1. 统一 Enforcer 返回值为 MASQUE 侧的 `request_id/status/error_code/message`，不要原样透传不同下游协议。
+2. 补充 QoS Flow 释放接口（当前 SMF `/qos-update` 只 add 不 release）和 N1 NAS QoS Rule，再进行用户面拥塞下的 UL/DL GBR 验证。
+3. 为 `smfenforcer` 补充独立单元测试和 Mock SMF 联调。
+4. 为 RouterEnforcer 增加独立的 `smf` 模式名，避免 `ngap` 在历史文档中既指 AF/PCF 又指 SMF 造成的歧义（当前 `ngap` 已统一指向 SMF 方案 A）。

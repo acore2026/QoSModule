@@ -23,8 +23,8 @@ set -e
 #  各模式需要的 IP:
 #    ran      → QOS_BIND + RAN_URL
 #    ran-udp  → QOS_BIND + RAN_UDP_ENDPOINT (+ RAN_UDP_ACK)
-#    ngap     → QOS_BIND + SMF_IP + SUPI_MAP (+ DEFAULT_5QI/DNN)
-#    auto     → 以上全部(HTTP→UDP→NGAP 依次回退)
+#    ngap     → QOS_BIND + SMF_ENDPOINT (方案A SMF /qos-update)
+#    auto     → 以上全部(HTTP→UDP→SMF 依次回退)
 # ============================================================
 
 # ---- 公共(所有模式) ----
@@ -38,13 +38,9 @@ RAN_UDP_ENDPOINT="${RAN_UDP_ENDPOINT:-10.88.0.3:9999}"  # gNB UDP 地址
 RAN_UDP_ACK="${RAN_UDP_ACK:-1}"                          # gNB 是否回应答(0=不等,1=等)
 
 # ---- mode=ngap(经核心网,以下才需要) ----
-SMF_IP="${SMF_IP:-10.100.200.5}"          # SMF 容器 IP;restart-all 后可能变
+SMF_IP="${SMF_IP:-10.100.200.8}"          # SMF 容器 IP(已在 docker-compose 固定)
 SMF_ENDPOINT="${SMF_ENDPOINT:-http://${SMF_IP}:8000}"
-PCF_IP="${PCF_IP:-10.100.200.12}"          # PCF 容器 IP(方案B 才用)
-PCF_ENDPOINT="${PCF_ENDPOINT:-http://${PCF_IP}:8000/npcf-policyauthorization/v1/app-sessions}"
-SUPI_MAP="${SUPI_MAP:-10.60.0.1=imsi-001012345678903}"   # UE IP→SUPI(ngap 才需要)
 DEFAULT_5QI="${DEFAULT_5QI:-2}"
-DEFAULT_DNN="${DEFAULT_DNN:-internet}"
 # ---- 默认地址结束 ----
 
 # ---- 运行时文件 ----
@@ -154,18 +150,19 @@ case "$MODE" in
     ;;
 
   ngap)
-    NGAP_URL="$SMF_ENDPOINT/nsmf-oam/v1/qos-update"
-    info "mode=ngap(方案A SMF 直连): $NGAP_URL"
-    info "  supi_map=$SUPI_MAP  5qi=$DEFAULT_5QI  dnn=$DEFAULT_DNN"
-    RUN_FLAGS="$COMMON_FLAGS -core-mode ngap -pcf-endpoint $NGAP_URL -supi-map $SUPI_MAP -default-5qi $DEFAULT_5QI -default-dnn $DEFAULT_DNN -arp-priority 8 -arp-preempt-cap 1 -arp-preempt-vuln 0"
+    SMF_OAM_URL="$SMF_ENDPOINT/nsmf-oam/v1/qos-update"
+    info "mode=ngap(方案A SMF 直连): $SMF_OAM_URL"
+    info "  5qi=$DEFAULT_5QI  arp_priority=8"
+    RUN_FLAGS="$COMMON_FLAGS -core-mode ngap -smf-endpoint $SMF_OAM_URL -default-5qi $DEFAULT_5QI -arp-priority 8 -arp-preempt-cap 1 -arp-preempt-vuln 0"
     ;;
 
   auto)
-    info "mode=auto(HTTP → UDP → NGAP 依次回退)"
+    SMF_OAM_URL="$SMF_ENDPOINT/nsmf-oam/v1/qos-update"
+    info "mode=auto(HTTP → UDP → SMF OAM 依次回退)"
     info "  HTTP: $RAN_URL"
     info "  UDP:  $RAN_UDP_ENDPOINT"
-    info "  NGAP: $SMF_ENDPOINT/nsmf-oam/v1/qos-update"
-    RUN_FLAGS="$COMMON_FLAGS -core-mode auto -ran-url $RAN_URL -ran-udp-endpoint $RAN_UDP_ENDPOINT -ran-udp-ack=$RAN_UDP_ACK -pcf-endpoint $SMF_ENDPOINT/nsmf-oam/v1/qos-update -supi-map $SUPI_MAP -default-5qi $DEFAULT_5QI -default-dnn $DEFAULT_DNN"
+    info "  SMF:  $SMF_OAM_URL"
+    RUN_FLAGS="$COMMON_FLAGS -core-mode auto -ran-url $RAN_URL -ran-udp-endpoint $RAN_UDP_ENDPOINT -ran-udp-ack=$RAN_UDP_ACK -smf-endpoint $SMF_OAM_URL -default-5qi $DEFAULT_5QI -arp-priority 8 -arp-preempt-cap 1 -arp-preempt-vuln 0"
     ;;
 
   *)
@@ -189,7 +186,6 @@ case "$MODE" in
     echo "  gNB HTTP:  $RAN_URL"
     echo "  gNB UDP:   $RAN_UDP_ENDPOINT"
     echo "  SMF:       $SMF_ENDPOINT"
-    echo "  UE 映射:   $SUPI_MAP"
     echo ""
     echo "日志: tail -f $LOG_FILE"
     echo "PID:  cat $PID_FILE"

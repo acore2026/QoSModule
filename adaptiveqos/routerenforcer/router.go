@@ -15,9 +15,10 @@ const (
 	ModeRAN Mode = "ran"
 	// ModeRanUDP routes to the gNB-UDP enforcer (udpranenforcer).
 	ModeRanUDP Mode = "ran-udp"
-	// ModeNGAP routes to the AF/PCF enforcer (core-network NGAP path).
+	// ModeNGAP routes to the SMF OAM enforcer (方案 A: SMF /qos-update →
+	// AMF → gNB NGAP). The SMF resolves the PDU session by UE IP.
 	ModeNGAP Mode = "ngap"
-	// ModeAuto tries RAN first and falls back to NGAP on failure.
+	// ModeAuto tries RAN first, then UDP RAN, then SMF OAM (NGAP) on failure.
 	ModeAuto Mode = "auto"
 )
 
@@ -41,16 +42,16 @@ func ParseMode(s string) (Mode, error) {
 // It implements the adaptiveqos.Enforcer interface so it can replace a single
 // enforcer in QoSHandler without changing the pipeline.
 type RouterEnforcer struct {
-	ranEnforcer   adaptiveqos.Enforcer
+	ranEnforcer    adaptiveqos.Enforcer
 	udpRanEnforcer adaptiveqos.Enforcer
-	afEnforcer    adaptiveqos.Enforcer
-	mode          Mode
+	smfEnforcer    adaptiveqos.Enforcer
+	mode           Mode
 }
 
 // New builds a RouterEnforcer. Any enforcer may be nil if the deployment
 // only uses some modes (e.g. ngap-only for the closed gNB).
-func New(ran, udpRan, af adaptiveqos.Enforcer, mode Mode) *RouterEnforcer {
-	return &RouterEnforcer{ranEnforcer: ran, udpRanEnforcer: udpRan, afEnforcer: af, mode: mode}
+func New(ran, udpRan, smf adaptiveqos.Enforcer, mode Mode) *RouterEnforcer {
+	return &RouterEnforcer{ranEnforcer: ran, udpRanEnforcer: udpRan, smfEnforcer: smf, mode: mode}
 }
 
 func (r *RouterEnforcer) Apply(ctx context.Context, intent adaptiveqos.Intent, decision adaptiveqos.Decision) (adaptiveqos.ApplyResult, error) {
@@ -69,12 +70,12 @@ func (r *RouterEnforcer) Apply(ctx context.Context, intent adaptiveqos.Intent, d
 		}
 		return r.udpRanEnforcer.Apply(ctx, intent, decision)
 	case ModeNGAP:
-		if r.afEnforcer == nil {
-			return adaptiveqos.ApplyResult{}, fmt.Errorf("ngap mode selected but AF enforcer is nil")
+		if r.smfEnforcer == nil {
+			return adaptiveqos.ApplyResult{}, fmt.Errorf("ngap mode selected but SMF enforcer is nil")
 		}
-		return r.afEnforcer.Apply(ctx, intent, decision)
+		return r.smfEnforcer.Apply(ctx, intent, decision)
 	case ModeAuto:
-		// Try HTTP RAN first, then UDP RAN, then NGAP.
+		// Try HTTP RAN first, then UDP RAN, then SMF OAM (NGAP).
 		if r.ranEnforcer != nil {
 			if res, err := r.ranEnforcer.Apply(ctx, intent, decision); err == nil && res.Status == adaptiveqos.StatusAccepted {
 				return res, nil
@@ -85,10 +86,10 @@ func (r *RouterEnforcer) Apply(ctx context.Context, intent adaptiveqos.Intent, d
 				return res, nil
 			}
 		}
-		if r.afEnforcer == nil {
-			return adaptiveqos.ApplyResult{}, fmt.Errorf("auto mode fell back but AF enforcer is nil")
+		if r.smfEnforcer == nil {
+			return adaptiveqos.ApplyResult{}, fmt.Errorf("auto mode fell back but SMF enforcer is nil")
 		}
-		return r.afEnforcer.Apply(ctx, intent, decision)
+		return r.smfEnforcer.Apply(ctx, intent, decision)
 	default:
 		return adaptiveqos.ApplyResult{}, fmt.Errorf("unknown mode %q", r.mode)
 	}

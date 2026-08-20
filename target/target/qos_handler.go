@@ -9,8 +9,8 @@ import (
 	"time"
 
 	adaptiveqos "github.com/acore2026/adaptive-qos"
-	"github.com/acore2026/adaptive-qos/afenforcer"
 	"github.com/acore2026/adaptive-qos/masqueapi"
+	"github.com/acore2026/adaptive-qos/smfenforcer"
 	"github.com/acore2026/adaptive-qos/ranapi"
 	"github.com/acore2026/adaptive-qos/routerenforcer"
 	"github.com/acore2026/adaptive-qos/udpranenforcer"
@@ -25,10 +25,10 @@ type QoSConfig struct {
 	HTTPClient  *http.Client
 	Logger      *log.Logger
 
-	// CoreMode routes enforcement: "ran" → gNB-HTTP, "ran-udp" → gNB-UDP, "ngap" → AF/PCF, "auto" → ran then ngap.
+	// CoreMode routes enforcement: "ran" → gNB-HTTP, "ran-udp" → gNB-UDP, "ngap" → SMF OAM, "auto" → ran/ran-udp/smf in order.
 	CoreMode string
-	// AFConfig configures the AF/PCF enforcer used when CoreMode is ngap/auto.
-	AFConfig afenforcer.Config
+	// SMFConfig configures the SMF OAM enforcer (方案 A) used when CoreMode is ngap/auto.
+	SMFConfig smfenforcer.Config
 	// UDPRANConfig configures the UDP RAN enforcer used when CoreMode is ran-udp/auto.
 	UDPRANConfig udpranenforcer.Config
 }
@@ -64,15 +64,16 @@ func NewQoSHandler(cfg QoSConfig) (*QoSHandler, error) {
 		ranEnforcer = ranClient
 	}
 
-	// AF enforcer (PCF/NGAP). Built when the mode needs it and PCF endpoint is set.
-	var afEnforcer adaptiveqos.Enforcer
-	if (mode == routerenforcer.ModeNGAP || mode == routerenforcer.ModeAuto) && cfg.AFConfig.PCFEndpoint != "" {
-		afCfg := cfg.AFConfig
-		if afCfg.HTTPClient == nil {
-			afCfg.HTTPClient = cfg.HTTPClient
+	// SMF OAM enforcer (方案 A: SMF /qos-update → AMF → gNB). Built when the
+	// mode needs it and the SMF endpoint is set.
+	var smfEnforcer adaptiveqos.Enforcer
+	if (mode == routerenforcer.ModeNGAP || mode == routerenforcer.ModeAuto) && cfg.SMFConfig.SMFEndpoint != "" {
+		smfCfg := cfg.SMFConfig
+		if smfCfg.HTTPClient == nil {
+			smfCfg.HTTPClient = cfg.HTTPClient
 		}
-		afCfg.Logger = cfg.Logger
-		afEnforcer = afenforcer.New(afCfg)
+		smfCfg.Logger = cfg.Logger
+		smfEnforcer = smfenforcer.New(smfCfg)
 	}
 
 	// UDP RAN enforcer. Built when the mode needs it and UDP endpoint is set.
@@ -95,16 +96,16 @@ func NewQoSHandler(cfg QoSConfig) (*QoSHandler, error) {
 			return nil, errors.New("ran-udp mode selected but UDP RAN endpoint is empty")
 		}
 	case routerenforcer.ModeNGAP:
-		if afEnforcer == nil {
-			return nil, errors.New("ngap mode selected but AF PCF endpoint is empty")
+		if smfEnforcer == nil {
+			return nil, errors.New("ngap mode selected but SMF endpoint is empty")
 		}
 	case routerenforcer.ModeAuto:
-		if ranEnforcer == nil && udpRanEnforcer == nil && afEnforcer == nil {
-			return nil, errors.New("auto mode needs at least one of RAN / UDP RAN / AF PCF endpoint")
+		if ranEnforcer == nil && udpRanEnforcer == nil && smfEnforcer == nil {
+			return nil, errors.New("auto mode needs at least one of RAN / UDP RAN / SMF endpoint")
 		}
 	}
 
-	router := routerenforcer.New(ranEnforcer, udpRanEnforcer, afEnforcer, mode)
+	router := routerenforcer.New(ranEnforcer, udpRanEnforcer, smfEnforcer, mode)
 	return &QoSHandler{
 		processor: &adaptiveqos.Processor{
 			Policy:         adaptiveqos.NewBurstPolicy(cfg.Policy),

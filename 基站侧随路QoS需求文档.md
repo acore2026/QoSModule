@@ -255,7 +255,7 @@ QoSModule 定时器到期
 
 ## 9. 已知待办
 
-- QoSModule 尚未接入已验证的 SMF 外挂接口。
+- ~~QoSModule 尚未接入已验证的 SMF 外挂接口。~~（已接入：`smfenforcer` 实现 SMF 外挂路径并接入 `ngap`/`auto`，端到端验证到 gNB 建 DRB）
 - SMF 尚未实现 QoS Flow release。
 - 当前验证只发送 N2，UE 侧 N1 NAS QoS Rule 尚待补充，UL 分类需要继续验证。
 - UPF 下行流量是否按新 QFI 标记尚待验证。

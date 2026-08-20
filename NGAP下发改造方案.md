@@ -2,7 +2,7 @@
 
 > 状态日期：2026-08-11。
 >
-> 当前结论：封闭厂商 gNB 不提供 `/api/v1/qos/update`，应由核心网通过标准 NGAP 下发。SMF 外挂路径已经在外部 `acore2026/smf` 仓库完成端到端验证，但 QoSModule 尚未实现 `smfenforcer`，因此当前 Target 还不能直接选择该路径。
+> 当前结论：封闭厂商 gNB 不提供 `/api/v1/qos/update`，应由核心网通过标准 NGAP 下发。SMF 外挂路径已在外部 `acore2026/smf` 仓库完成端到端验证，且本 QoSModule 仓库已实现 `smfenforcer`（`adaptiveqos/smfenforcer/`）并接入 `ngap`/`auto` 模式，Target 现在可直接经该路径下发到 gNB。原 AF/PCF 路径（方案 B）已删除。
 
 ## 1. 目标与边界
 
@@ -11,8 +11,8 @@ QoSModule 负责接收 MASQUE 请求并计算动态 QoS。不同基站通过可�
 | 路径 | 适用对象 | 当前状态 |
 | --- | --- | --- |
 | gNB HTTP | 支持私有 QoS HTTP API 的开放 gNB、Mock RAN | 本仓库已实现并测试 |
-| AF/PCF | 支持完整 free5GC Policy Authorization 链路的部署 | 本仓库已实现 AF 请求；真实链路被 PCF/SMF 问题阻塞 |
-| SMF 外挂 | 当前封闭厂商 gNB | 外部 SMF 已跑通；本仓库尚未接入 |
+| ~~AF/PCF~~ | ~~支持完整 free5GC Policy Authorization 链路的部署~~ | 已删除：真实链路被 PCF/SMF 问题阻塞，由方案 A 取代 |
+| SMF 外挂 | 当前封闭厂商 gNB | 本仓库 `smfenforcer` 已实现并接入 `ngap`/`auto`，端到端验证到 gNB 建 DRB |
 
 NGAP 不由 QoSModule 或 UPF 直接发送。标准职责链是：
 
@@ -32,21 +32,22 @@ QoSModule -> SMF -> AMF -> gNB
 | MASQUE 适配 | `adaptiveqos/masqueapi/request.go` | 校验请求并生成 `Intent` |
 | 动态策略 | `adaptiveqos/policy.go` | 计算 MBR、GBR、PDB 和优先级 |
 | gNB HTTP Enforcer | `adaptiveqos/ranapi/client.go` | 调用 `/api/v1/qos/update` |
-| AF/PCF Enforcer | `adaptiveqos/afenforcer/` | 创建 3GPP AppSession，并在 burst 窗口后删除 |
+| SMF OAM Enforcer | `adaptiveqos/smfenforcer/` | 构造 SMF OAM 请求（方案 A），调用 `/nsmf-oam/v1/qos-update` |
 | 路由 | `adaptiveqos/routerenforcer/router.go` | 支持 `ran`、`ngap`、`auto` |
 | Target 装配 | `target/target/qos_handler.go` | 将 Enforcer 装入共享 Processor |
 
-代码中的 `ngap` 模式实际指向 AF/PCF Enforcer，不表示 Target 直接编码或发送 NGAP。
+代码中的 `ngap` 模式实际指向 SMF OAM Enforcer（方案 A），不表示 Target 直接编码或发送 NGAP。
 
 ### 2.2 尚未实现组件
 
 本仓库不存在以下内容：
 
-- `adaptiveqos/smfenforcer/`。
-- `-core-mode smf`。
-- SMF QoS Flow 释放请求。
-- N1 NAS QoS Rule 生成。
+- SMF QoS Flow 释放请求（`/qos-update` 当前只 add 不 release）。
+- N1 NAS QoS Rule 生成（当前只发 N2，UL 分类未覆盖）。
+- `-core-mode smf` 独立模式名（当前 `ngap` 模式直接用 `smfenforcer`，未新增 `smf` 别名）。
 - 通过 GTP-U 自定义扩展头向 gNB 传输 QoS JSON。
+
+`adaptiveqos/smfenforcer/` 已实现并接入 `ngap`/`auto`；原 `adaptiveqos/afenforcer/`（AF/PCF）已删除。
 
 因此，不能把外部 SMF 的成功记录表述成“当前 Target 已经完整支持真实基站”。
 
@@ -91,30 +92,14 @@ Target -> ranapi.Client -> POST /api/v1/qos/update -> gNB
 - 可以携带 MBR、GBR、PDB、MCS、RB、BLER、smooth 和 burst 信息。
 - 仅适用于明确实现该私有接口的 gNB。
 
-### 4.2 AF/PCF 路径
+### 4.2 ~~AF/PCF 路径~~（已删除）
+
+原方案 B 路径 `Target -> afenforcer -> PCF -> SMF -> AMF -> gNB` 已随 `afenforcer` 包删除一并移除。历史验证记录：AF 请求符合真实 PCF `AppSessionContextReqData`、PCF 返回 201，但 stock SMF `ApplyPccRules` nil `QosData` panic、fork SMF `Duplicate URR creation`，PFCP/N1N2 未能到 gNB。该路径不再保留，由方案 A（§4.3）取代。
+
+### 4.3 SMF 外挂路径（方案 A，已接入 Target）
 
 ```text
-Target -> afenforcer -> PCF -> SMF -> AMF -> gNB
-```
-
-已经验证：
-
-- AF 请求符合真实 PCF 的 `AppSessionContextReqData`。
-- PCF 返回 201，并成功通知 SMF。
-- SMF 可以解析 SDF Flow Description。
-
-未跑通原因：
-
-- stock SMF 在 `ApplyPccRules` 出现 nil `QosData` panic。
-- fork SMF 修复 panic 后又出现 `Duplicate URR creation`。
-- PFCP 和 N1N2 未能稳定继续到 gNB。
-
-该路径保留用于后续兼容或 free5GC 修复验证，但不作为当前基站的推荐部署路径。
-
-### 4.3 SMF 外挂路径
-
-```text
-QoSModule
+QoSModule (smfenforcer)
   -> POST /nsmf-oam/v1/qos-update
   -> SMF 根据 UE IP 查找 SM Context
   -> AddQosFlow + 创建 QER
@@ -123,7 +108,7 @@ QoSModule
   -> PDU Session Resource Modify -> gNB
 ```
 
-该路径绕开 PCF 生成 PCC Rule 后进入 `ApplyPccRules` 的问题链路，直接复用 SMF 内部已工作的 QoS Flow 修改流程。
+该路径绕开 PCF 生成 PCC Rule 后进入 `ApplyPccRules` 的问题链路，直接复用 SMF 内部已工作的 QoS Flow 修改流程。已由本仓库 `smfenforcer` 实现并接入 `ngap`/`auto` 模式（`-smf-endpoint`），通过 Target UDP 触发端到端验证到 gNB 返回 `PDUSessionResourceModifyResponse` 并建立 DRB。
 
 ## 5. 已验证的 SMF 接口
 
@@ -195,9 +180,9 @@ RNTI 与 SUPI 不存在可由 QoSModule 直接查询的通用映射，不应尝�
 
 ## 7. QoSModule 待实现改造
 
-### 7.1 新增 `smfenforcer`
+### 7.1 `smfenforcer`（已实现）
 
-新增 `adaptiveqos/smfenforcer/`，实现现有接口：
+`adaptiveqos/smfenforcer/` 已实现 `Enforcer` 接口：
 
 ```go
 type Enforcer interface {
@@ -205,26 +190,27 @@ type Enforcer interface {
 }
 ```
 
-职责包括：
+已实现职责：
 
-1. 校验 UE IP、QFI 和上下行速率。
-2. 把 kbps 转换成带 `bps` 单位的字符串。
-3. 构造 SMF 请求并设置超时。
-4. 解析 HTTP 状态和业务状态。
-5. 转换成统一 `ApplyResult`，不泄漏 SMF 私有响应格式。
+1. 校验 UE IP（`intent.Flow.UEAddress` 作为 `ue_ip`）。
+2. 把 kbps 转换成带 ` bps` 单位的字符串（防 SMF `StringToBitRate` panic）。
+3. 构造 OAM 请求体（`request_id`/`ue_ip`/`qfi`/`five_qi`/`mbr_ul`/`arp`）并 POST 到 `-smf-endpoint`。
+4. 解析 HTTP 状态和 `status`/`amf_cause`/`cause` 业务状态。
+5. 转换成统一 `ApplyResult`（成功透传 SMF 的 `ACCEPTED`+`amf_cause` 响应体）。
 
-### 7.2 明确路由模式
+已接入 `routerenforcer` 的 `ngap`/`auto` 模式，`auto` 回退链为 RAN → UDP RAN → SMF OAM。待补：独立单元测试、Mock SMF 联调、QoS Flow 释放语义。
 
-建议将模式扩展为：
+### 7.2 路由模式（已更新）
+
+当前 `routerenforcer` 模式：
 
 | 模式 | Enforcer |
 | --- | --- |
 | `ran` | gNB HTTP |
-| `pcf` | AF/PCF |
-| `smf` | SMF 外挂 |
-| `auto` | 按明确配置的顺序回退 |
+| `ngap` | SMF OAM（方案 A） |
+| `auto` | RAN → UDP RAN → SMF OAM 依次回退 |
 
-当前 `ngap` 名称同时容易被理解为“直接 NGAP”，应迁移为更准确的 `pcf`，并为旧参数保留兼容别名。
+方案 B 删除后，`ngap` 已统一指向 SMF OAM，不再有 AF/PCF 歧义。未来若需区分多条核心网路径，可再新增独立 `smf` 模式名，当前不必要。
 
 ### 7.3 补充释放流程
 
@@ -260,9 +246,9 @@ burst 到期后的恢复应由 QoSModule/SMF 发起标准 QoS Flow 修改或释�
 
 ## 9. 实施顺序
 
-1. 在本仓库实现 `smfenforcer` 和单元测试。
-2. 增加 `smf` 模式并保持 `ran` 路径兼容。
-3. 使用 Mock SMF 验证请求映射、错误转换和超时。
-4. 接入外部 fork SMF，复测 PFCP、N1N2、NGAP 和 DRB。
+1. ~~在本仓库实现 `smfenforcer` 和单元测试。~~（已实现 `smfenforcer`，接入 `ngap`/`auto`；独立单元测试待补）
+2. ~~增加 `smf` 模式并保持 `ran` 路径兼容。~~（当前 `ngap` 直接用 `smfenforcer`，未新增独立 `smf` 模式名）
+3. ~~使用 Mock SMF 验证请求映射、错误转换和超时。~~（当前直接对接外部 fork SMF 验证，Mock SMF 待补）
+4. ~~接入外部 fork SMF，复测 PFCP、N1N2、NGAP 和 DRB。~~（已完成，见 §8 与《方案 A》）
 5. 增加 QoS Flow 释放和 N1 NAS QoS Rule。
 6. 完成真实视频和拥塞场景验收后，再将 SMF 路径标记为生产可用。

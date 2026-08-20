@@ -1,6 +1,6 @@
 # 方案 A(SMF 外挂)实现与验证总结
 
-> 文档状态：当前推荐路径的真实联调记录。SMF 端改造位于外部 `acore2026/smf` 仓库；本 QoSModule 仓库尚未实现调用该接口的 `smfenforcer`，因此“全链跑通”指独立接口验证成功，不代表当前 Target 已可通过启动参数使用该路径。
+> 文档状态：方案 A 的真实联调记录。SMF 端改造位于外部 `acore2026/smf` 仓库；本 QoSModule 仓库已实现 `smfenforcer`（`adaptiveqos/smfenforcer/`）并接入 `ngap`/`auto` 模式（`-smf-endpoint`），已通过 Target UDP 触发端到端验证到 gNB 建 DRB。原“独立接口验证”已升级为“Target 全链验证”。原 AF/PCF 路径（方案 B，`afenforcer`）已删除。
 
 > 时间:2026-08-07
 > 目标:对当前封闭 gNB,让 QoS 下发真正让 RAN 动态调整某 UE 的 QoS。

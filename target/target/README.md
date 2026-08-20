@@ -167,10 +167,8 @@ Priority = 3
 | `-core-mode` | 实际 Enforcer | 状态 |
 | --- | --- | --- |
 | `ran` | `ranapi.Client` | 默认；调用 gNB HTTP API |
-| `ngap` | `afenforcer.Enforcer` | 调用 PCF，不是 Target 直接发送 NGAP |
-| `auto` | 先 RAN，失败后 AF/PCF | 只有 RAN 返回 `ACCEPTED` 才停止回退 |
-
-已经验证成功的 SMF `/nsmf-oam/v1/qos-update` 尚未接入 Target，当前不存在 `-core-mode smf`。
+| `ngap` | `smfenforcer.Enforcer` | 调用 fork SMF `/nsmf-oam/v1/qos-update`（方案 A），不是 Target 直接发送 NGAP |
+| `auto` | 先 RAN，再 UDP RAN，失败后 SMF OAM | 只有返回 `ACCEPTED` 才停止回退 |
 
 ### 5.2 gNB HTTP 模式
 
@@ -198,22 +196,23 @@ go run ./cmd/target \
 
 `-ran-mask auto` 会根据实际序列化字段自动置位。UL-only 请求不会设置 DL 字段对应的 bit。
 
-### 5.3 AF/PCF 模式
+### 5.3 SMF OAM 模式（方案 A）
 
 ```bash
 go run ./cmd/target \
   -mode qos \
   -b 0.0.0.0:7400 \
   -core-mode ngap \
-  -pcf-endpoint http://pcf.free5gc.org:8000/npcf-policyauthorization/v1/app-sessions \
-  -supi-map "10.60.0.1=imsi-001012345678903" \
-  -default-dnn internet \
-  -default-5qi 2
+  -smf-endpoint http://10.100.200.8:8000/nsmf-oam/v1/qos-update \
+  -default-5qi 2 \
+  -arp-priority 8 -arp-preempt-cap 1 -arp-preempt-vuln 0
 ```
 
-AF/PCF 路径使用 UE IP 查静态 SUPI 映射，并生成真实 3GPP `AppSessionContext` 请求。真实 PCF 已接受该格式，但当前 free5GC PCF→SMF apply 链存在 panic/重复 URR 问题，所以该模式不应被视为当前生产可用路径。
+SMF 路径（方案 A）由 `smfenforcer` 把 `Decision` 转成 fork SMF 的 OAM 请求体（`ue_ip`/`five_qi`/`mbr_ul:"X bps"`/`arp`）。SMF 按 UE IP 查 PDU 会话，经 PFCP 装载 QER、N1N2 触发 AMF 下发 NGAP `PDUSessionResourceModifyRequest`，gNB 据此建立 DRB。该路径已端到端验证到 gNB 响应。
 
-`cmd/mockpcf` 仍按早期平铺 JSON 结构进行严格校验，而 `afenforcer` 已改为 `ascReqData` 包装结构。更新 Mock PCF 前，不能把二者的严格模式测试结果作为当前协议验证依据。
+SMF 不需要 SUPI 映射（按 `ue_ip` 寻址），故无 `-supi-map` 参数；也不需要 DNN（会话本身已带 DNN），故无 `-default-dnn` 参数。原 AF/PCF 路径（`afenforcer`）及 `-pcf-endpoint`/`-supi-map`/`-default-dnn` 参数已随方案 B 删除一并移除。
+
+`cmd/mockpcf` 是为已删除的 AF/PCF 路径准备的 Mock，当前不再参与联调，保留仅供历史参考。
 
 ## 6. Mock RAN 联调
 
@@ -309,6 +308,6 @@ go test ./...
 
 当前缺口：
 
-- `afenforcer` 和 `routerenforcer` 没有独立单元测试。
-- `mockpcf` 没有测试，且协议模型落后于当前 `afenforcer`。
-- 尚无 `smfenforcer` 和 SMF Mock 联调测试。
+- `smfenforcer` 和 `routerenforcer` 没有独立单元测试。
+- `mockpcf` 是为已删除的 AF/PCF 路径准备的，当前无测试且不再参与联调。
+- 尚无 Mock SMF 联调测试（当前验证直接对接外部 fork SMF）。

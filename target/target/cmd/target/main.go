@@ -9,13 +9,12 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
 	adaptiveqos "github.com/acore2026/adaptive-qos"
-	"github.com/acore2026/adaptive-qos/afenforcer"
 	"github.com/acore2026/adaptive-qos/ranapi"
+	"github.com/acore2026/adaptive-qos/smfenforcer"
 	"github.com/acore2026/adaptive-qos/udpranenforcer"
 	target "masque-target"
 )
@@ -31,7 +30,7 @@ func main() {
 	var qType, qCap, qVul uint
 	var dlMaxMCS, ulMaxMCS, dlMaxRB, ulMaxRB uint
 	var dlBLERUpper, ulBLERUpper, dlSmooth, ulSmooth float64
-	var coreMode, pcfEndpoint, supiMap, defaultDNN string
+	var coreMode, smfEndpoint string
 	var defaultFiveQI, arpPriority uint
 	var arpPreemptCap, arpPreemptVuln uint
 	var ranUDPEndpoint string
@@ -60,9 +59,7 @@ func main() {
 	flag.Float64Var(&dlSmooth, "dl-smooth", 0.5, "RAN DL smooth alpha")
 	flag.Float64Var(&ulSmooth, "ul-smooth", 0.5, "RAN UL smooth alpha")
 	flag.StringVar(&coreMode, "core-mode", "ran", "core enforcement mode: ran|ngap|auto")
-	flag.StringVar(&pcfEndpoint, "pcf-endpoint", "", "PCF PolicyAuthorization app-session URL (for ngap/auto mode), e.g. http://pcf.free5gc.org:8000/npcf-policyauthorization/v1/app-sessions")
-	flag.StringVar(&supiMap, "supi-map", "", "static UE IP→SUPI map, comma-separated (e.g. 10.60.0.2=imsi-001012345678903)")
-	flag.StringVar(&defaultDNN, "default-dnn", "internet", "default DNN for AF app-session")
+	flag.StringVar(&smfEndpoint, "smf-endpoint", "", "SMF OAM qos-update URL (for ngap/auto mode, 方案 A), e.g. http://10.100.200.8:8000/nsmf-oam/v1/qos-update")
 	flag.UintVar(&defaultFiveQI, "default-5qi", 2, "default 5QI for burst GBR flow")
 	flag.UintVar(&arpPriority, "arp-priority", 3, "ARP priority level")
 	flag.UintVar(&arpPreemptCap, "arp-preempt-cap", 1, "ARP pre-emption capability (1=may preempt)")
@@ -94,25 +91,21 @@ func main() {
 		policyCfg.TransitDelayRatio = transitDelayRatio
 		policyCfg.DefaultTransitDelayMS = uint64(defaultTransitDelay / time.Millisecond)
 
-		afCfg := afenforcer.DefaultConfig()
-		if pcfEndpoint != "" {
-			afCfg.PCFEndpoint = pcfEndpoint
+		smfCfg := smfenforcer.DefaultConfig()
+		if smfEndpoint != "" {
+			smfCfg.SMFEndpoint = smfEndpoint
 		}
-		afCfg.DefaultFiveQI = uint8(defaultFiveQI)
-		afCfg.DefaultDNN = defaultDNN
+		smfCfg.DefaultFiveQI = uint8(defaultFiveQI)
 		if arpPriority > 15 {
 			log.Fatalf("arp-priority must be in [0,15]")
 		}
 		if arpPreemptCap > 1 || arpPreemptVuln > 1 {
-			log.Fatalf("arp-preempt-cap and arp-preempt-vuln must be 0 or 1")
+			log.Fatalf("arp-preempt-cap and -preempt-vuln must be 0 or 1")
 		}
-		afCfg.ARP = afenforcer.ARPConfig{
+		smfCfg.ARP = smfenforcer.ARPConfig{
 			PriorityLevel: uint8(arpPriority),
 			PreemptCap:    arpPreemptCap == 1,
 			PreemptVuln:   arpPreemptVuln == 1,
-		}
-		if supiMap != "" {
-			afCfg.SUPIMap = parseSUPIMap(supiMap)
 		}
 
 		udpRanCfg := udpranenforcer.Config{
@@ -129,7 +122,7 @@ func main() {
 			RANDefaults: ranDefaults,
 			Logger:      logger,
 			CoreMode:    coreMode,
-			AFConfig:    afCfg,
+			SMFConfig:   smfCfg,
 			UDPRANConfig: udpRanCfg,
 		})
 		if err != nil {
@@ -205,21 +198,4 @@ func buildRANDefaults(
 
 func unitInterval(value float64) bool {
 	return value >= 0 && value <= 1
-}
-
-// parseSUPIMap parses a "ip=supi,ip=supi" string into a map.
-func parseSUPIMap(raw string) map[string]string {
-	out := make(map[string]string)
-	for _, pair := range strings.Split(raw, ",") {
-		kv := strings.SplitN(strings.TrimSpace(pair), "=", 2)
-		if len(kv) != 2 {
-			continue
-		}
-		k := strings.TrimSpace(kv[0])
-		v := strings.TrimSpace(kv[1])
-		if k != "" && v != "" {
-			out[k] = v
-		}
-	}
-	return out
 }
