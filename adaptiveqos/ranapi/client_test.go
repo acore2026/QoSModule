@@ -105,8 +105,8 @@ func TestBuildRequestAllowsStaticMaskOverride(t *testing.T) {
 		PDBMS:     100,
 		Priority:  3,
 	}}, RequestDefaults{Mask: 123, StaticMask: true})
-	if request.Mask != 123 {
-		t.Fatalf("mask = %d, want static override", request.Mask)
+	if request.Mask != 122 {
+		t.Fatalf("mask = %d, want 122 (static 123 with RNTI bit forced to 0)", request.Mask)
 	}
 }
 
@@ -123,8 +123,7 @@ func expectedFullMask() uint32 {
 }
 
 func expectedULOnlyMask() uint32 {
-	return MaskBitRNTI |
-		MaskBitULMaxMCS |
+	return MaskBitULMaxMCS |
 		MaskBitULMaxRB |
 		MaskBitULBLERUpper |
 		MaskBitULSmooth |
