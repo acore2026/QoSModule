@@ -25,7 +25,7 @@ type Enforcer struct {
 
 // Config configures the UDP RAN enforcer.
 type Config struct {
-	Endpoint   string                 // gNB UDP address, e.g. "10.88.120.212:54003"
+	Endpoint   string                 // gNB UDP address, e.g. "10.88.0.3:9999"
 	Timeout    time.Duration
 	Defaults   ranapi.RequestDefaults
 	WaitForAck bool // whether the gNB sends a UDP reply
