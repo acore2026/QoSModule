@@ -25,12 +25,14 @@ type ARPConfig struct {
 // modify) to the UPF/AMF/gNB. SUPI is not needed: the SMF addresses the
 // session by UE IP, so no supi-map is required (unlike the AF/PCF path).
 type Config struct {
-	SMFEndpoint   string
-	Timeout       time.Duration
-	DefaultFiveQI uint8
-	ARP           ARPConfig
-	HTTPClient    *http.Client
-	Logger        *log.Logger
+	SMFEndpoint    string
+	ReleaseEndpoint string // SMF /qos-release URL; empty => derived from SMFEndpoint
+	Timeout        time.Duration
+	DefaultFiveQI  uint8
+	ARP            ARPConfig
+	HTTPClient     *http.Client
+	Logger         *log.Logger
+	EndGrace       time.Duration // extra grace before auto-releasing the QoS flow
 }
 
 // DefaultConfig returns a Config that matches the verified 方案 A request
@@ -40,5 +42,6 @@ func DefaultConfig() Config {
 		Timeout:       5 * time.Second,
 		DefaultFiveQI: 2,
 		ARP:           ARPConfig{PriorityLevel: 8, PreemptCap: true, PreemptVuln: false},
+		EndGrace:      2 * time.Second,
 	}
 }
