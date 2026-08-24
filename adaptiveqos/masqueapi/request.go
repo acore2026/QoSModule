@@ -129,12 +129,16 @@ func (r Request) Intent() adaptiveqos.Intent {
 		serviceType = r.ServiceInfo.ServiceType
 	}
 	burst := r.BurstInfo
+	ueAddress := r.SourceAddress
+	if r.PacketFilter != nil && r.PacketFilter.SrcIP != "" {
+		ueAddress = r.PacketFilter.SrcIP
+	}
 	intent := adaptiveqos.Intent{
 		RequestID: r.RequestID,
 		Flow: adaptiveqos.FlowSelector{
 			RNTI:      dereference(r.RNTI),
 			QFI:       dereference(r.QFI),
-			UEAddress: r.SourceAddress,
+			UEAddress: ueAddress,
 		},
 		ULBurst: adaptiveqos.BurstDemand{
 			SizeKB:     dereference(burst.ULBurstSize),
