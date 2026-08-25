@@ -22,6 +22,10 @@ Thumbs.db
 *.swp
 *.swo
 
+# Python cache (ranreporter collector).
+__pycache__/
+*.pyc
+
 # build artifacts (go build without -o)
 target/target/mockpcf
 target/target/target

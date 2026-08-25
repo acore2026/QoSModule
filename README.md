@@ -22,6 +22,21 @@ QoSModule 接收 MASQUE Proxy 转发的 UDP QoS 请求，将业务突发需求�
 - `ngap`：调用 SMF OAM Enforcer（方案 A），由 SMF 经 AMF 触发 NGAP。该名称不表示 Target 直接发送 NGAP。
 - `auto`：先尝试 gNB HTTP，再 gNB UDP，失败后回退 SMF OAM（方案 A）。
 
+### 采集启动与 QoS 模式关联
+
+`ranreporter` 采集器的启动与否由 QoSModule 的启动模式决定（`restart-all.sh` step 10 实现，复刻 `routerenforcer` 的 `auto` 回退逻辑 `ran→udp→ngap`）：
+
+| QoS 模式 | 采集器 | 说明 |
+| --- | --- | --- |
+| `ngap` | **启动** | 经 SMF/NGAP 下发，gNB L2 trace 不暴露 5QI=2/GFBR，采集器用 QoSModule 日志取 q_lvl/gbr + 基站 trace 取 sendrate |
+| `ran` | **启动** | HTTP 直连 gNB，同上 |
+| `ran-udp` | **不启动** | UDP 直连模拟 gNB（如 UERANSIM），采集真实基站无意义 |
+| `auto` | 按实际回退 | 探 UDP 端点（默认 `10.88.0.3:9999`）有回包 → ran-udp（不启动）；否则 → ngap（启动） |
+
+可通过环境变量覆盖：`QOS_MODE=ngap|ran|ran-udp|auto ./restart-all.sh`。
+
+> 技术根因：基站 duapp0 的 L2 trace 只到 DRB 级（5QI=5 默认承载），不暴露专载 5QI=2 和 GFBR（CallP 只把 AMBR 透到 L2，且判非法用默认值）。故 ngap/ran 模式下采集器必须用 QoSModule 下发日志作为 q_lvl/gbr 的真值来源，sendrate 仍走基站 trace。详见 `ranreporter/REPORTING.md`。
+
 ## 代码结构
 
 ```text
@@ -42,10 +57,30 @@ target/target/                   MASQUE 后端 UDP 服务
     ├── target/                  正式 Target
     ├── mockran/                 Mock RAN
     └── mockpcf/                 Mock PCF
+
+ranreporter/                     基站实时指标采集器 (Python)
+├── collector.py                 主程序: SSH→odi tracebuff→sendrate + QoSModule 日志→q_lvl/gbr→POST 前端
+├── mock_frontend.py             前端接收端 mock (联调用)
+├── qos_relay.py                 核心机中转 (gNB 本机直跑时转发到前端)
+├── udp_probe.py                 UDP 端点探针 (auto 模式判定用)
+└── REPORTING.md                 指标上报方案文档
 ```
 
 `target_backup_20260803-200912/` 是旧 Target 快照，不是当前运行入口。
 `ref/` 被顶层仓库忽略，可能包含本地 free6gc 实验代码，不属于本仓库发布内容。
+
+### RANReporter 指标采集器
+
+`ranreporter/collector.py` 负责把基站实时空口指标上报给前端展示:
+
+| 指标 | 来源 | 说明 |
+| --- | --- | --- |
+| `sendrate_kbps` | 基站 duapp0 odi tracebuff | RLC 字节 tag Δcount × 末次字节 / 真实墙钟 Δt |
+| `q_lvl` (5QI) | QoSModule 日志活跃下发优先 | 基站 L2 trace 不暴露专载 5QI=2，用下发真值兜底 |
+| `gbr_kbps` | QoSModule 日志活跃下发的 GFBR | 基站 AMBR "第二槽"是推断假值不可信，用下发真值 |
+| `timestamp` | `time.time()*1000` | 毫秒级 epoch |
+
+采集器在 `restart-all.sh` step 10 启动，启动与否与 QoS 模式关联（见下节）。
 
 ## 当前文档
 
@@ -55,6 +90,7 @@ target/target/                   MASQUE 后端 UDP 服务
 | [NGAP 下发改造方案](NGAP下发改造方案.md) | 当前下发路径、真实验证结果和待接入项 |
 | [方案 A：SMF 外挂实现与验证](方案A-SMF外挂-实现与验证.md) | 已跑通的 SMF、PFCP、N1N2、NGAP 和 DRB 证据 |
 | [基站侧随路 QoS 需求](基站侧随路QoS需求文档.md) | 当前基站通过标准 NGAP 接入时的职责和验收要求 |
+| [RANReporter 指标上报](ranreporter/REPORTING.md) | 基站实时指标(sendrate/gbr/q_lvl)采集与上报方案、已知局限 |
 | [Target README](target/target/README.md) | UDP 协议、运行参数和 Mock 联调方法 |
 | [adaptive-qos README](adaptiveqos/README.md) | 共享策略模块及适配器边界 |
 
