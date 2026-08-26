@@ -41,7 +41,7 @@ GBR_5QI = {1, 2, 3, 4, 65, 66, 67, 71, 72, 73, 74, 75, 76, 79, 80, 82, 83, 84}
 
 # QoSModule 下发日志解析: 基站 L2 trace 不暴露 GFBR/专载 5QI 时, 用下发侧真值兜底
 QM_TS_RE = re.compile(r"(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}\.\d+)")
-QM_APPLY_RE = re.compile(r"smf enforcer apply .*?request_id=(\S+).*?five_qi=(\d+).*?gbr_ul=(\d+).*?gbr_dl=(\d+)")
+QM_APPLY_RE = re.compile(r"smf enforcer apply .*?request_id=(\S+).*?five_qi=(\d+).*?gbr_ul=(\d+).*?gbr_dl=(\d+).*?status=(\S+).*?burst_ms=(\d+)")
 QM_REL_RE = re.compile(r"smf enforcer released .*?request_id=(\S+)")
 
 
@@ -208,7 +208,42 @@ def post_metrics(url, samples):
         return 0, str(e)
 
 
-def take_sample(host, local=False):
+def bridge_apply_to_mock_ran(mock_url, request_id, five_qi, gbr_kbps, burst_ms):
+    """smf-mock 桥接: 把 QoSModule 经 SMF 下发的 QoS 通知 mock-ran, 触发其状态机模拟吞吐。
+    QoSModule smf 模式 POST 真 SMF(不经过 mock-ran), 故 mock-ran 不知道发生了下发;
+    由 collector 从 qos-module.log 检测到 apply 后, 用 ranapi 格式 POST 给 mock-ran,
+    mock-ran 收到后跑 RAMP_UP/STEADY/RAMP_DOWN, collector 再读其 /metrics 上报前端。"""
+    body = json.dumps({
+        "request_id": request_id,
+        "rnti": 0,
+        "q_qfi": 4,
+        "q_lvl": five_qi,
+        "q_gbr_ul": gbr_kbps,
+        "q_gbr_dl": 0,
+        "burst_info": {"ul_burst_duration": burst_ms, "ul_burst_size": 0, "e2e_delay_budget": 0},
+    }).encode()
+    url = mock_url.rstrip("/") + "/api/v1/qos/update"
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as r:
+            return r.status, r.read().decode("utf-8", "replace")
+    except Exception as e:
+        return 0, str(e)
+
+
+def take_sample(host, local=False, mock_url=None):
+    # mock-ran 模式: HTTP GET /metrics 直接拿快照, 跳过 SSH/odi/parse_trace。
+    # mock-ran 已是真值源(sendrate/gbr/q_lvl/alive/crnti 由其状态机算好)。
+    if mock_url:
+        url = mock_url.rstrip("/") + "/metrics"
+        try:
+            with urllib.request.urlopen(url, timeout=HTTP_TIMEOUT) as r:
+                data = json.loads(r.read().decode("utf-8", "replace"))
+        except Exception as e:
+            log("mock-ran /metrics failed: %s" % e)
+            return {}
+        return data
     if local:
         r = subprocess.run(ODI_CMD, shell=True, capture_output=True, text=True, timeout=SSH_TIMEOUT)
         if r.returncode != 0 and r.stderr:
@@ -218,7 +253,8 @@ def take_sample(host, local=False):
 
 
 def load_active_qos_qm():
-    """从 QoSModule 日志取当前活跃下发(apply 后未 release)的 (five_qi, gbr_kbps)。
+    """从 QoSModule 日志取当前活跃下发(apply 后未 release, 且 status=ACCEPTED)的最新一条。
+    返回 dict {request_id, five_qi, gbr_kbps, burst_ms} 或 None。
     基站 L2 trace 只到 DRB 级(5QI=5 默认承载、无 GFBR), 不暴露专载 5QI/GBR;
     当基站侧取不到 GBR 时, 用下发侧真值兜底。无活跃下发返回 None。"""
     try:
@@ -233,22 +269,52 @@ def load_active_qos_qm():
         ts = tsm.group(1) if tsm else ""
         am = QM_APPLY_RE.search(ln)
         if am:
-            rid, qi, gu, gd = am.group(1), int(am.group(2)), int(am.group(3)), int(am.group(4))
-            apply_state[rid] = (ts, qi, max(gu, gd))
+            rid = am.group(1)
+            qi = int(am.group(2))
+            gbr = max(int(am.group(3)), int(am.group(4)))
+            status = am.group(5)
+            burst_ms = int(am.group(6))
+            # 仅 ACCEPTED 的 apply 才算真正下发成功(失败的 apply 无后续 release)
+            apply_state[rid] = (ts, qi, gbr, burst_ms) if status == "ACCEPTED" else None
         rm = QM_REL_RE.search(ln)
         if rm:
             rel_ts[rm.group(1)] = ts
     best = None
-    for rid, (ts, qi, gbr) in apply_state.items():
+    for rid, st in apply_state.items():
+        if st is None:
+            continue
+        ts, qi, gbr, burst_ms = st
         rts = rel_ts.get(rid)
         if rts and rts >= ts:
             continue
         if best is None or ts >= best[0]:
-            best = (ts, qi, gbr)
-    return (best[1], best[2]) if best else None
+            best = (ts, rid, qi, gbr, burst_ms)
+    if not best:
+        return None
+    return {"request_id": best[1], "five_qi": best[2], "gbr_kbps": best[3], "burst_ms": best[4]}
 
 
-def build_sample(prev, curr, dt, q_lvl_override, gbr_override, qm=None):
+def build_sample(prev, curr, dt, q_lvl_override, gbr_override, qm=None, mock=False):
+    # mock-ran 模式: curr 是 /metrics 快照 dict, sendrate/gbr/q_lvl/alive/crnti 已算好。
+    # 不调 extract_qos (trace 解析), 不调 load_active_qos_qm (qos-module.log 兜底) —— mock-ran 是真值源。
+    if mock:
+        q_auto = int(curr.get("q_lvl", 9) or 9)
+        gbr_auto = int(curr.get("gbr_kbps", 0) or 0)
+        alive = bool(curr.get("alive", False))
+        crnti = curr.get("crnti")
+        sendrate = int(curr.get("sendrate_kbps", 0) or 0)
+        if q_lvl_override is not None or gbr_override is not None:
+            q_lvl = q_lvl_override if q_lvl_override is not None else q_auto
+            gbr_kbps = gbr_override if gbr_override is not None else gbr_auto
+        else:
+            q_lvl, gbr_kbps = q_auto, gbr_auto
+        s = {
+            "timestamp": int(time.time() * 1000),
+            "sendrate_kbps": sendrate,
+            "gbr_kbps": gbr_kbps,
+            "q_lvl": q_lvl,
+        }
+        return s, alive, crnti
     q_auto, gbr_auto, alive, crnti = extract_qos(curr)
     if q_lvl_override is not None or gbr_override is not None:
         # 人工 override 模式(联调): 完全用人工值, 缺省字段回退基站, 不混入 QoSModule
@@ -261,7 +327,7 @@ def build_sample(prev, curr, dt, q_lvl_override, gbr_override, qm=None):
         if qm is None:
             qm = load_active_qos_qm()
         if qm:
-            q_lvl, gbr_kbps = qm
+            q_lvl, gbr_kbps = qm["five_qi"], qm["gbr_kbps"]
         else:
             q_lvl, gbr_kbps = q_auto, gbr_auto
     s = {
@@ -273,41 +339,69 @@ def build_sample(prev, curr, dt, q_lvl_override, gbr_override, qm=None):
     return s, alive, crnti
 
 
-def run_once(host, url, q_lvl_override, gbr_override, interval, local=False):
-    prev = take_sample(host, local)
+def run_once(host, url, q_lvl_override, gbr_override, interval, local=False, mock_url=None):
+    prev = take_sample(host, local, mock_url)
     t_prev = time.time()
     time.sleep(interval)
-    curr = take_sample(host, local)
+    curr = take_sample(host, local, mock_url)
     t_curr = time.time()
     dt = t_curr - t_prev or interval
-    q, g, alive, crnti = extract_qos(curr)
-    log("auto关联: alive=%s crnti=%s q_lvl=%s gbr=%skbps dt=%.3fs (override: q=%s gbr=%s)" % (alive, crnti, q, g, dt, q_lvl_override, gbr_override))
-    s, _alive, _crnti = build_sample(prev, curr, dt, q_lvl_override, gbr_override)
+    mock = bool(mock_url)
+    if mock:
+        q, g, alive, crnti = (int(curr.get("q_lvl", 9) or 9),
+                               int(curr.get("gbr_kbps", 0) or 0),
+                               bool(curr.get("alive", False)),
+                               curr.get("crnti"))
+        log("mock-ran snapshot: alive=%s crnti=%s q_lvl=%s gbr=%skbps dt=%.3fs (override: q=%s gbr=%s)"
+            % (alive, crnti, q, g, dt, q_lvl_override, gbr_override))
+    else:
+        q, g, alive, crnti = extract_qos(curr)
+        log("auto关联: alive=%s crnti=%s q_lvl=%s gbr=%skbps dt=%.3fs (override: q=%s gbr=%s)"
+            % (alive, crnti, q, g, dt, q_lvl_override, gbr_override))
+    s, _alive, _crnti = build_sample(prev, curr, dt, q_lvl_override, gbr_override, mock=mock)
     log("sample: %s" % json.dumps(s, ensure_ascii=False))
     st, resp = post_metrics(url, [s])
     log("POST -> %s %s" % (st, resp[:200]))
     return st == 200
 
 
-def run_loop(host, url, q_lvl_override, gbr_override, interval, window_size=WINDOW_SIZE, push_interval=PUSH_INTERVAL, local=False):
-    log("loop start: interval=%.2fs push=%.2fs window=%d target=%s 变更/活动触发推送,空闲静默 (override q=%s gbr=%s local=%s)" % (interval, push_interval, window_size, url, q_lvl_override, gbr_override, local))
+def run_loop(host, url, q_lvl_override, gbr_override, interval, window_size=WINDOW_SIZE, push_interval=PUSH_INTERVAL, local=False, mock_url=None, tail_secs=8.0, smf_bridge=False):
+    mock = bool(mock_url)
+    log("loop start: interval=%.2fs push=%.2fs window=%d tail=%.1fs target=%s 变更/活动触发推送,burst结束后tail填满窗口右侧再冻结 (override q=%s gbr=%s local=%s mock=%s smf_bridge=%s%s)"
+        % (interval, push_interval, window_size, tail_secs, url, q_lvl_override, gbr_override, local, mock, smf_bridge, (" url=%s" % mock_url) if mock else ""))
     window = deque(maxlen=window_size)
-    prev = take_sample(host, local)
+    prev = take_sample(host, local, mock_url)
     t_prev = time.time()
     next_t = t_prev
     last_push = 0.0
     last_pushed = None
     last_alive = None
+    tail_until = 0.0
+    bridged_rids = set()  # smf_bridge: 已桥接到 mock-ran 的 request_id, 避免重复 POST
     while True:
         next_t += interval
         sleep_for = next_t - time.time()
         if sleep_for > 0:
             time.sleep(sleep_for)
-        curr = take_sample(host, local)
+        curr = take_sample(host, local, mock_url)
         t_curr = time.time()
         dt = t_curr - t_prev or interval
-        qm = load_active_qos_qm()
-        s, alive, crnti = build_sample(prev, curr, dt, q_lvl_override, gbr_override, qm)
+        # smf-mock 桥接: QoSModule 经 SMF 下发(POST 真 SMF, 不经过 mock-ran), collector
+        # 从 qos-module.log 检测到新 apply 后, 用 ranapi 格式通知 mock-ran 触发其状态机模拟。
+        # ran/ran-udp 模式 QoSModule 直 POST mock-ran, 无需桥接。
+        if smf_bridge and mock:
+            apply_info = load_active_qos_qm()
+            if apply_info and apply_info["request_id"] not in bridged_rids:
+                st, resp = bridge_apply_to_mock_ran(mock_url, apply_info["request_id"],
+                                                    apply_info["five_qi"], apply_info["gbr_kbps"],
+                                                    apply_info["burst_ms"])
+                bridged_rids.add(apply_info["request_id"])
+                log("bridge smf apply -> mock-ran: request_id=%s five_qi=%d gbr=%dkbps burst_ms=%d -> HTTP %s"
+                    % (apply_info["request_id"], apply_info["five_qi"], apply_info["gbr_kbps"],
+                       apply_info["burst_ms"], st))
+        # mock-ran 是真值源, 无需读 qos-module.log 兜底 build_sample; 真实模式才读
+        qm = None if mock else load_active_qos_qm()
+        s, alive, crnti = build_sample(prev, curr, dt, q_lvl_override, gbr_override, qm, mock=mock)
         window.append(s)
         prev = curr
         t_prev = t_curr
@@ -317,12 +411,18 @@ def run_loop(host, url, q_lvl_override, gbr_override, interval, window_size=WIND
                          s["q_lvl"] != last_pushed["q_lvl"] or
                          s["gbr_kbps"] != last_pushed["gbr_kbps"] or
                          alive != last_alive)
-        should_push = active or state_changed
+        # burst 结束(alive 由 True 转 False)时启动 tail: 继续推 tail_secs 秒,
+        # 让前端窗口右侧的恢复段(IDLE 基线)填满, 再冻结。避免 burst 一结束就冻、右侧留空。
+        if not alive and alive != last_alive:
+            tail_until = now + tail_secs
+        in_tail = now < tail_until
+        should_push = active or state_changed or in_tail
         rate_ok = last_pushed is None or now - last_push >= push_interval
         if should_push and rate_ok:
             st, resp = post_metrics(url, list(window))
             if st == 200:
-                log("ok alive=%s crnti=%s sendrate=%dkbps gbr=%dkbps qlvl=%d (push %d samples, %s)" % (alive, crnti, s["sendrate_kbps"], s["gbr_kbps"], s["q_lvl"], len(window), "变更触发" if state_changed else "活动持续"))
+                reason = "变更触发" if state_changed else ("tail填满" if in_tail and not active else "活动持续")
+                log("ok alive=%s crnti=%s sendrate=%dkbps gbr=%dkbps qlvl=%d (push %d samples, %s)" % (alive, crnti, s["sendrate_kbps"], s["gbr_kbps"], s["q_lvl"], len(window), reason))
             else:
                 log("ERR %s %s" % (st, resp[:200]))
             last_push = now
@@ -334,6 +434,7 @@ def run_loop(host, url, q_lvl_override, gbr_override, interval, window_size=WIND
 
 
 def main():
+    global QOSMODULE_LOG
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default=GNB_HOST)
     ap.add_argument("--url", default=FRONTEND_URL)
@@ -345,21 +446,38 @@ def main():
     ap.add_argument("--once", action="store_true", help="只采一次并 POST(联调用)")
     ap.add_argument("--no-mux", action="store_true", help="禁用 SSH 连接复用(0.5s高频不建议)")
     ap.add_argument("--local", action="store_true", help="本机直跑 odi(部署在基站上时用,去 SSH 开销)")
+    ap.add_argument("--mock-ran", default=None, help="mock-ran URL(如 http://127.0.0.1:18080); 跳过 SSH/parse_trace/qos-module.log, 直接采 mock 数据。ran/ran-udp 模式: QoSModule 直 POST mock-ran。")
+    ap.add_argument("--smf-mock-ran", default=None, help="smf 桥接 mock-ran URL: QoSModule 经 SMF 下发(POST 真 SMF 不经 mock-ran), collector 从 qos-module.log 检测 apply 后桥接通知 mock-ran 模拟吞吐, 再读 mock-ran 上报。数据源同 --mock-ran, 额外开启 smf_bridge。")
+    ap.add_argument("--qos-log", default=None, help="QoSModule 日志路径(默认 %s), smf-mock-ran 桥接从此读 smf enforcer apply 行" % QOSMODULE_LOG)
+    ap.add_argument("--tail-secs", type=float, default=8.0, help="burst 结束后继续推送的尾期秒数(默认8.0, 填满前端窗口右侧恢复段后再冻结)")
     args = ap.parse_args()
 
-    if not args.local and not args.no_mux:
-        open_ssh_master(args.host)
-    cfg = load_qos_config(args.host, args.local)
-    if cfg and cfg["fiveqi"]:
-        log("confdb FiveQI entries: %s" % cfg["fiveqi"])
+    # --qos-log 覆盖 QoSModule 日志路径(load_active_qos_qm 读此)
+    if args.qos_log:
+        QOSMODULE_LOG = args.qos_log
+
+    # smf-mock-ran: 数据源用 mock-ran(--mock-ran 语义), 额外开启 smf_bridge
+    mock_url = args.mock_ran or args.smf_mock_ran
+    smf_bridge = bool(args.smf_mock_ran)
+
+    # mock-ran / smf-mock-ran 模式: 跳过 SSH/odi/confdb, mock-ran 是真值源
+    if mock_url:
+        mode = "smf-mock-ran 桥接" if smf_bridge else "mock-ran"
+        log("%s 模式: %s (跳过 SSH/odi/confdb%s)" % (mode, mock_url, ", smf apply 从 qos-module.log 桥接到 mock-ran" if smf_bridge else ""))
+    else:
+        if not args.local and not args.no_mux:
+            open_ssh_master(args.host)
+        cfg = load_qos_config(args.host, args.local)
+        if cfg and cfg["fiveqi"]:
+            log("confdb FiveQI entries: %s" % cfg["fiveqi"])
 
     try:
         if args.once:
-            ok = run_once(args.host, args.url, args.q_lvl, args.gbr_kbps, args.interval, args.local)
+            ok = run_once(args.host, args.url, args.q_lvl, args.gbr_kbps, args.interval, args.local, mock_url)
             sys.exit(0 if ok else 1)
-        run_loop(args.host, args.url, args.q_lvl, args.gbr_kbps, args.interval, args.window, args.push_interval, args.local)
+        run_loop(args.host, args.url, args.q_lvl, args.gbr_kbps, args.interval, args.window, args.push_interval, args.local, mock_url, args.tail_secs, smf_bridge)
     finally:
-        if not args.local and not args.no_mux:
+        if not mock_url and not args.local and not args.no_mux:
             close_ssh_master(args.host)
 
 
