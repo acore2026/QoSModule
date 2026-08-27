@@ -20,7 +20,39 @@ QoSModule 接收 MASQUE Proxy 转发的 UDP QoS 请求，将业务突发需求�
 
 - `ran`：调用 gNB HTTP API。
 - `ngap`：调用 SMF OAM Enforcer（方案 A），由 SMF 经 AMF 触发 NGAP。该名称不表示 Target 直接发送 NGAP。
-- `auto`：先尝试 gNB HTTP，再 gNB UDP，失败后回退 SMF OAM（方案 A）。
+- `auto`：三档独立回退 `ran-udp → ran(mock-ran) → ngap(SMF OAM)`。UDP(真 gNB) 失败回退 mock-ran(本地 HTTP, ranapi `/api/v1/qos/update`), mock-ran 失败再回退真 SMF(`/nsmf-oam/v1/qos-update`); mock-ran 与真 SMF 端点/格式分离。需 `-ran-udp-ack=1`, 否则 UDP fire-and-forget 永远"成功"不触发回退。
+
+### auto 模式回退时延
+
+auto 是**逐请求同步重试、无状态记忆、无熔断**（`adaptiveqos/routerenforcer/router.go` 的 `ModeAuto`）：每个请求都从第 1 档 UDP 重新开始，不记录上次结果，不缓存"哪档当前可用"。
+
+实测延迟（参考值）：
+
+| 环节 | 延迟 |
+| --- | --- |
+| mock-ran POST（本地 HTTP + 内存状态） | ~2ms |
+| UDP 死端口 ack 超时（`-ran-timeout` 默认 3s） | ~3000ms |
+
+gNB 离线时单请求时序：
+
+```
+t=0~3s   第1档 UDP: Write(快) → Read 等回包 → 等 ran-timeout 超时 ❌
+t=3s     回退第2档 mock-ran: POST localhost:18081 → ~2ms ✅
+t≈3s     返回 ACCEPTED
+```
+
+单请求总延迟 ≈ 3s，其中 mock-ran 那步只占 ~0.07%，99.93% 花在 UDP 空等上。**mock-ran 步骤本身再快（~2ms）也救不了——前面有 `ran-timeout` 的 UDP 空等挡着**。
+
+> 反直觉：gNB 长期离线时，auto 模式比直接走 `ngap`（真 SMF，几十~几百 ms）还慢，因为每请求都先吃满一次 UDP 超时才回退。
+
+缓解方案：
+
+| 方案 | 做法 | gNB 离线时单请求 | 代价 |
+| --- | --- | --- | --- |
+| 调小超时 | auto 时 `-ran-timeout 0.5s` | ~0.5s | 真 gNB 回包慢时可能误判失败 |
+| 熔断（未实现） | UDP 连续失败 N 次后冷却期跳过 UDP，首请求直走 mock-ran，定期复探恢复 | ~2ms | 需加熔断器状态代码 |
+
+> 当前未实现熔断。若 gNB 离线场景对延迟敏感：调试时直接用 `ran` 模式指向 mock-ran（省去 UDP 空等），或调小 `-ran-timeout`。
 
 ### 采集启动与 QoS 模式关联
 
