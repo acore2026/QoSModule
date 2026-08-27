@@ -18,7 +18,9 @@ const (
 	// ModeNGAP routes to the SMF OAM enforcer (方案 A: SMF /qos-update →
 	// AMF → gNB NGAP). The SMF resolves the PDU session by UE IP.
 	ModeNGAP Mode = "ngap"
-	// ModeAuto tries RAN first, then UDP RAN, then SMF OAM (NGAP) on failure.
+	// ModeAuto tries UDP RAN first, then mock-ran (HTTP ranapi), then SMF OAM.
+	// 三档独立回退: UDP(真 gNB) → mock-ran(本地模拟收 QoS+模拟指标) → SMF(真 SMF/NGAP)。
+	// 注: 需 -ran-udp-ack=1, 否则 UDP fire-and-forget 永远"成功"不会回退。
 	ModeAuto Mode = "auto"
 )
 
@@ -75,14 +77,16 @@ func (r *RouterEnforcer) Apply(ctx context.Context, intent adaptiveqos.Intent, d
 		}
 		return r.smfEnforcer.Apply(ctx, intent, decision)
 	case ModeAuto:
-		// Try HTTP RAN first, then UDP RAN, then SMF OAM (NGAP).
-		if r.ranEnforcer != nil {
-			if res, err := r.ranEnforcer.Apply(ctx, intent, decision); err == nil && res.Status == adaptiveqos.StatusAccepted {
+		// 三档独立回退: UDP(真 gNB) → mock-ran(ran HTTP ranapi) → SMF OAM(真 SMF)。
+		// mock-ran 走 /api/v1/qos/update(ranapi 格式带 burst_info), 与真 SMF 分开。
+		// 需 -ran-udp-ack=1, 否则 UDP fire-and-forget 永远"成功"不会触发回退。
+		if r.udpRanEnforcer != nil {
+			if res, err := r.udpRanEnforcer.Apply(ctx, intent, decision); err == nil && res.Status == adaptiveqos.StatusAccepted {
 				return res, nil
 			}
 		}
-		if r.udpRanEnforcer != nil {
-			if res, err := r.udpRanEnforcer.Apply(ctx, intent, decision); err == nil && res.Status == adaptiveqos.StatusAccepted {
+		if r.ranEnforcer != nil {
+			if res, err := r.ranEnforcer.Apply(ctx, intent, decision); err == nil && res.Status == adaptiveqos.StatusAccepted {
 				return res, nil
 			}
 		}

@@ -100,8 +100,9 @@ func NewQoSHandler(cfg QoSConfig) (*QoSHandler, error) {
 			return nil, errors.New("ngap mode selected but SMF endpoint is empty")
 		}
 	case routerenforcer.ModeAuto:
+		// auto 是 UDP→mock-ran(ran HTTP)→SMF 三档回退, 至少需要一档。
 		if ranEnforcer == nil && udpRanEnforcer == nil && smfEnforcer == nil {
-			return nil, errors.New("auto mode needs at least one of RAN / UDP RAN / SMF endpoint")
+			return nil, errors.New("auto mode needs at least one of RAN / UDP RAN / SMF endpoint (UDP→mock-ran→SMF fallback)")
 		}
 	}
 

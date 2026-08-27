@@ -158,11 +158,12 @@ case "$MODE" in
 
   auto)
     SMF_OAM_URL="$SMF_ENDPOINT/nsmf-oam/v1/qos-update"
-    info "mode=auto(HTTP → UDP → SMF OAM 依次回退)"
-    info "  HTTP: $RAN_URL"
-    info "  UDP:  $RAN_UDP_ENDPOINT"
-    info "  SMF:  $SMF_OAM_URL"
-    RUN_FLAGS="$COMMON_FLAGS -core-mode auto -ran-url $RAN_URL -ran-udp-endpoint $RAN_UDP_ENDPOINT -ran-udp-ack=$RAN_UDP_ACK -smf-endpoint $SMF_OAM_URL -default-5qi $DEFAULT_5QI -arp-priority 8 -arp-preempt-cap 1 -arp-preempt-vuln 0"
+    MOCK_RAN_URL="${MOCK_RAN_URL:-http://127.0.0.1:18081/api/v1/qos/update}"
+    info "mode=auto(UDP → mock-ran → SMF 三档回退)"
+    info "  UDP:      $RAN_UDP_ENDPOINT (ack=$RAN_UDP_ACK, 需开 ack 才能因无回包触发回退)"
+    info "  mock-ran: $MOCK_RAN_URL"
+    info "  SMF:      $SMF_OAM_URL"
+    RUN_FLAGS="$COMMON_FLAGS -core-mode auto -ran-url $MOCK_RAN_URL -ran-udp-endpoint $RAN_UDP_ENDPOINT -ran-udp-ack=$RAN_UDP_ACK -ran-timeout 3s -smf-endpoint $SMF_OAM_URL -default-5qi $DEFAULT_5QI -arp-priority 8 -arp-preempt-cap 1 -arp-preempt-vuln 0"
     ;;
 
   *)
