@@ -44,6 +44,13 @@ QM_TS_RE = re.compile(r"(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}\.\d+)")
 QM_APPLY_RE = re.compile(r"smf enforcer apply .*?request_id=(\S+).*?five_qi=(\d+).*?gbr_ul=(\d+).*?gbr_dl=(\d+).*?status=(\S+).*?burst_ms=(\d+)")
 QM_REL_RE = re.compile(r"smf enforcer released .*?request_id=(\S+)")
 
+# auto 跟随: 解析 routerenforcer tryStage 日志, 取最近一条 -> done 的 stage 判定当前数据源。
+# stage 形如: ran | ran-udp | ngap(smf) | auto 1/3 udp-ran | auto 2/3 mock-ran | auto 3/3 smf
+# (routerenforcer/router.go tryStage: "%s: %s %s %s" -> "stage: elapsed outcome -> done|fallback")
+QM_STAGE_RE = re.compile(
+    r"(auto \d/3 (?:udp-ran|mock-ran|smf)|ran-udp|ngap\(smf\)|\bran): .*?-> (done|fallback)"
+)
+
 
 def log(msg):
     print("[%s] %s" % (datetime.now().strftime("%H:%M:%S.%f")[:-3], msg), flush=True)
@@ -294,6 +301,52 @@ def load_active_qos_qm():
     return {"request_id": best[1], "five_qi": best[2], "gbr_kbps": best[3], "burst_ms": best[4]}
 
 
+def detect_active_source(mock_url):
+    """auto 跟随: 读 qos-module.log 取最近一条 tryStage 成功(-> done)的 stage,
+    判定 collector 本轮应采用的数据源。返回 'mock'|'real'|'smf_bridge'|None。
+
+    映射(对齐 routerenforcer/router.go 各 mode 的 stage 名):
+      - auto 2/3 mock-ran / 裸 ran(mock) -> 'mock': QoSModule 已直 POST mock-ran,
+        mock 状态机已在跑, collector 只读 /metrics 即可。
+      - auto 1/3 udp-ran / ran-udp       -> 'real': 真 gNB, 走 SSH/trace。
+      - auto 3/3 smf / ngap(smf)         -> 'smf_bridge': QoSModule POST 真 SMF 未经 mock-ran,
+        需把 apply 桥接到 mock-ran 触发其状态机, 再读 /metrics。
+      - 裸 ran(mode=ran HTTP)日志不区分 mock/真gNB: 探 mock-ran 是否 mid-burst(alive) 判定。
+      - 无任何 -> done 记录(刚起, 还没 QoS 请求): 返回 None, 调用方默认 real。
+    """
+    try:
+        with open(QOSMODULE_LOG) as f:
+            lines = f.readlines()[-120:]
+    except Exception:
+        return None
+    last_done = None
+    for ln in lines:
+        m = QM_STAGE_RE.search(ln)
+        if not m:
+            continue
+        if m.group(2) == "done":
+            last_done = m.group(1)
+    if not last_done:
+        return None
+    if "mock-ran" in last_done:
+        return "mock"
+    if "udp-ran" in last_done or last_done == "ran-udp":
+        return "real"
+    if "smf" in last_done or "ngap" in last_done:
+        return "smf_bridge"
+    # 裸 ran: ran 模式 + RAN_URL 指向 mock 时, mock-ran 直接收 apply 并跑状态机,
+    # alive=True 即说明 mock 在服务 burst; 否则按真 gNB 处理。
+    if mock_url:
+        try:
+            with urllib.request.urlopen(mock_url.rstrip("/") + "/metrics", timeout=2) as r:
+                snap = json.loads(r.read().decode("utf-8", "replace"))
+            if snap.get("alive"):
+                return "mock"
+        except Exception:
+            pass
+    return "real"
+
+
 def build_sample(prev, curr, dt, q_lvl_override, gbr_override, qm=None, mock=False):
     # mock-ran 模式: curr 是 /metrics 快照 dict, sendrate/gbr/q_lvl/alive/crnti 已算好。
     # 不调 extract_qos (trace 解析), 不调 load_active_qos_qm (qos-module.log 兜底) —— mock-ran 是真值源。
@@ -339,7 +392,15 @@ def build_sample(prev, curr, dt, q_lvl_override, gbr_override, qm=None, mock=Fal
     return s, alive, crnti
 
 
-def run_once(host, url, q_lvl_override, gbr_override, interval, local=False, mock_url=None):
+def run_once(host, url, q_lvl_override, gbr_override, interval, local=False, mock_url=None, auto_mock_url=None):
+    # auto 跟随(一次性): 单次探测当前源, mock/smf_bridge 用 mock /metrics, real 用 SSH
+    if auto_mock_url:
+        src = detect_active_source(auto_mock_url)
+        if src in ("mock", "smf_bridge"):
+            mock_url = auto_mock_url
+        else:
+            mock_url = None
+        log("run_once auto-ran: src=%s -> mock_url=%s" % (src, mock_url))
     prev = take_sample(host, local, mock_url)
     t_prev = time.time()
     time.sleep(interval)
@@ -365,12 +426,23 @@ def run_once(host, url, q_lvl_override, gbr_override, interval, local=False, moc
     return st == 200
 
 
-def run_loop(host, url, q_lvl_override, gbr_override, interval, window_size=WINDOW_SIZE, push_interval=PUSH_INTERVAL, local=False, mock_url=None, tail_secs=8.0, smf_bridge=False):
+def run_loop(host, url, q_lvl_override, gbr_override, interval, window_size=WINDOW_SIZE, push_interval=PUSH_INTERVAL, local=False, mock_url=None, tail_secs=8.0, smf_bridge=False, auto_mock_url=None):
+    # auto_mock_url: 自动跟随模式。每轮读 qos-module.log 判定 QoSModule 实际走哪档(-> done),
+    # 动态切换 mock/real/smf_bridge 数据源; 源切换时重置 prev 避免跨源算 sendrate 乱跳。
+    # 优先于静态 mock_url/smf_bridge(auto 模式下二者被忽略)。
     mock = bool(mock_url)
-    log("loop start: interval=%.2fs push=%.2fs window=%d tail=%.1fs target=%s 变更/活动触发推送,burst结束后tail填满窗口右侧再冻结 (override q=%s gbr=%s local=%s mock=%s smf_bridge=%s%s)"
-        % (interval, push_interval, window_size, tail_secs, url, q_lvl_override, gbr_override, local, mock, smf_bridge, (" url=%s" % mock_url) if mock else ""))
+    if auto_mock_url:
+        log("loop start(auto-ran 跟随): interval=%.2fs push=%.2fs window=%d tail=%.1fs target=%s mock-ran=%s host=%s local=%s"
+            " — 每轮读 %s 判定源(mock-ran档->读mock /metrics; udp-ran/ran-udp档->SSH真gNB; smf/ngap档->桥接mock)"
+            % (interval, push_interval, window_size, tail_secs, url, auto_mock_url, host, local, QOSMODULE_LOG))
+    else:
+        log("loop start: interval=%.2fs push=%.2fs window=%d tail=%.1fs target=%s 变更/活动触发推送,burst结束后tail填满窗口右侧再冻结 (override q=%s gbr=%s local=%s mock=%s smf_bridge=%s%s)"
+            % (interval, push_interval, window_size, tail_secs, url, q_lvl_override, gbr_override, local, mock, smf_bridge, (" url=%s" % mock_url) if mock else ""))
     window = deque(maxlen=window_size)
-    prev = take_sample(host, local, mock_url)
+    # eff_*: 本轮实际生效的数据源(auto 模式每轮重算; 静态模式恒定)
+    eff_mock = None if auto_mock_url else mock_url
+    eff_smf_bridge = False if auto_mock_url else smf_bridge
+    prev = take_sample(host, local, eff_mock)
     t_prev = time.time()
     next_t = t_prev
     last_push = 0.0
@@ -383,16 +455,34 @@ def run_loop(host, url, q_lvl_override, gbr_override, interval, window_size=WIND
         sleep_for = next_t - time.time()
         if sleep_for > 0:
             time.sleep(sleep_for)
-        curr = take_sample(host, local, mock_url)
+        # auto 跟随: 读 qos-module.log 取最近 -> done 的 stage, 判定本轮数据源
+        if auto_mock_url:
+            src = detect_active_source(auto_mock_url)
+            if src == "mock":
+                cur_mock, cur_smf = auto_mock_url, False
+            elif src == "smf_bridge":
+                cur_mock, cur_smf = auto_mock_url, True
+            else:  # real 或 None(尚无 apply 记录, 默认 real)
+                cur_mock, cur_smf = None, False
+            if cur_mock != eff_mock or cur_smf != eff_smf_bridge:
+                log("auto-ran 源切换: src=%s -> mock=%s smf_bridge=%s (重置 prev)" % (src, bool(cur_mock), cur_smf))
+                eff_mock, eff_smf_bridge = cur_mock, cur_smf
+                prev = None  # 跨源 prev 无意义, 本轮只刷新 prev 不出样本
+        mock_url_eff = eff_mock
+        smf_bridge_eff = eff_smf_bridge
+        mock_b = bool(mock_url_eff)
+        curr = take_sample(host, local, mock_url_eff)
         t_curr = time.time()
+        if prev is None:
+            prev = curr
+            t_prev = t_curr
+            continue
         dt = t_curr - t_prev or interval
-        # smf-mock 桥接: QoSModule 经 SMF 下发(POST 真 SMF, 不经过 mock-ran), collector
-        # 从 qos-module.log 检测到新 apply 后, 用 ranapi 格式通知 mock-ran 触发其状态机模拟。
-        # ran/ran-udp 模式 QoSModule 直 POST mock-ran, 无需桥接。
-        if smf_bridge and mock:
+        # smf-mock 桥接: 仅当当前源是 smf_bridge(QoSModule 经 SMF 下发不经 mock-ran, 需桥接 apply)
+        if smf_bridge_eff and mock_b:
             apply_info = load_active_qos_qm()
             if apply_info and apply_info["request_id"] not in bridged_rids:
-                st, resp = bridge_apply_to_mock_ran(mock_url, apply_info["request_id"],
+                st, resp = bridge_apply_to_mock_ran(mock_url_eff, apply_info["request_id"],
                                                     apply_info["five_qi"], apply_info["gbr_kbps"],
                                                     apply_info["burst_ms"])
                 bridged_rids.add(apply_info["request_id"])
@@ -400,8 +490,8 @@ def run_loop(host, url, q_lvl_override, gbr_override, interval, window_size=WIND
                     % (apply_info["request_id"], apply_info["five_qi"], apply_info["gbr_kbps"],
                        apply_info["burst_ms"], st))
         # mock-ran 是真值源, 无需读 qos-module.log 兜底 build_sample; 真实模式才读
-        qm = None if mock else load_active_qos_qm()
-        s, alive, crnti = build_sample(prev, curr, dt, q_lvl_override, gbr_override, qm, mock=mock)
+        qm = None if mock_b else load_active_qos_qm()
+        s, alive, crnti = build_sample(prev, curr, dt, q_lvl_override, gbr_override, qm, mock=mock_b)
         window.append(s)
         prev = curr
         t_prev = t_curr
@@ -448,6 +538,11 @@ def main():
     ap.add_argument("--local", action="store_true", help="本机直跑 odi(部署在基站上时用,去 SSH 开销)")
     ap.add_argument("--mock-ran", default=None, help="mock-ran URL(如 http://127.0.0.1:18080); 跳过 SSH/parse_trace/qos-module.log, 直接采 mock 数据。ran/ran-udp 模式: QoSModule 直 POST mock-ran。")
     ap.add_argument("--smf-mock-ran", default=None, help="smf 桥接 mock-ran URL: QoSModule 经 SMF 下发(POST 真 SMF 不经 mock-ran), collector 从 qos-module.log 检测 apply 后桥接通知 mock-ran 模拟吞吐, 再读 mock-ran 上报。数据源同 --mock-ran, 额外开启 smf_bridge。")
+    ap.add_argument("--auto-ran", default=None, metavar="MOCK_URL",
+                    help="auto 跟随模式: 传 mock-ran URL(如 http://127.0.0.1:18081)。每轮读 qos-module.log "
+                         "判定 QoSModule 当前实际走哪档(-> done): mock-ran 档->读 mock /metrics; "
+                         "udp-ran/ran-udp 档->SSH 真 gNB; smf/ngap 档->桥接 apply 到 mock 再读。"
+                         "源切换时重置 prev。优先于 --mock-ran/--smf-mock-ran(二者被忽略)。")
     ap.add_argument("--qos-log", default=None, help="QoSModule 日志路径(默认 %s), smf-mock-ran 桥接从此读 smf enforcer apply 行" % QOSMODULE_LOG)
     ap.add_argument("--tail-secs", type=float, default=8.0, help="burst 结束后继续推送的尾期秒数(默认8.0, 填满前端窗口右侧恢复段后再冻结)")
     args = ap.parse_args()
@@ -459,9 +554,19 @@ def main():
     # smf-mock-ran: 数据源用 mock-ran(--mock-ran 语义), 额外开启 smf_bridge
     mock_url = args.mock_ran or args.smf_mock_ran
     smf_bridge = bool(args.smf_mock_ran)
+    auto_mock_url = args.auto_ran
+    # auto 跟随优先: 置空静态 mock_url/smf_bridge, 避免 finally 误判是否需关 SSH master
+    if auto_mock_url:
+        mock_url = None
+        smf_bridge = False
 
     # mock-ran / smf-mock-ran 模式: 跳过 SSH/odi/confdb, mock-ran 是真值源
-    if mock_url:
+    if auto_mock_url:
+        log("auto-ran 跟随模式: mock-ran=%s (每轮读 %s 判定源: mock/real/smf_bridge)" % (auto_mock_url, QOSMODULE_LOG))
+        # real 档需要 SSH master, auto 模式随时可能切到 real, 故预先建好
+        if not args.local and not args.no_mux:
+            open_ssh_master(args.host)
+    elif mock_url:
         mode = "smf-mock-ran 桥接" if smf_bridge else "mock-ran"
         log("%s 模式: %s (跳过 SSH/odi/confdb%s)" % (mode, mock_url, ", smf apply 从 qos-module.log 桥接到 mock-ran" if smf_bridge else ""))
     else:
@@ -473,10 +578,11 @@ def main():
 
     try:
         if args.once:
-            ok = run_once(args.host, args.url, args.q_lvl, args.gbr_kbps, args.interval, args.local, mock_url)
+            ok = run_once(args.host, args.url, args.q_lvl, args.gbr_kbps, args.interval, args.local, mock_url, auto_mock_url=auto_mock_url)
             sys.exit(0 if ok else 1)
-        run_loop(args.host, args.url, args.q_lvl, args.gbr_kbps, args.interval, args.window, args.push_interval, args.local, mock_url, args.tail_secs, smf_bridge)
+        run_loop(args.host, args.url, args.q_lvl, args.gbr_kbps, args.interval, args.window, args.push_interval, args.local, mock_url, args.tail_secs, smf_bridge, auto_mock_url=auto_mock_url)
     finally:
+        # 非 mock 档(含 auto)用了 SSH master, 需关闭; 纯 mock_url 模式没开过
         if not mock_url and not args.local and not args.no_mux:
             close_ssh_master(args.host)
 
