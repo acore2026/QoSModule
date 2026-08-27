@@ -106,7 +106,7 @@ func NewQoSHandler(cfg QoSConfig) (*QoSHandler, error) {
 		}
 	}
 
-	router := routerenforcer.New(ranEnforcer, udpRanEnforcer, smfEnforcer, mode)
+	router := routerenforcer.New(ranEnforcer, udpRanEnforcer, smfEnforcer, mode, cfg.Logger)
 	return &QoSHandler{
 		processor: &adaptiveqos.Processor{
 			Policy:         adaptiveqos.NewBurstPolicy(cfg.Policy),
