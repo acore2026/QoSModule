@@ -63,6 +63,10 @@ type oamARP struct {
 // oamQoSUpdateRequest mirrors the body of POST /nsmf-oam/v1/qos-update in
 // acore2026/smf (internal/sbi/processor/oam_qos.go). Bitrate strings must
 // carry a " bps" unit suffix or the SMF StringToBitRate parser panics.
+//
+// BurstMS is a mock-only extension:真实 fork SMF 按 3GPP 不需要 burst 时长
+// (按 NGAP 释放信令拆除), 会忽略此未知字段(Go json 默认忽略); mock-ran 当 SMF 时
+// 用它驱动 sendrate 状态机(RAMP_UP/STEADY/RAMP_DOWN)的 burst 窗口。
 type oamQoSUpdateRequest struct {
 	RequestID string  `json:"request_id"`
 	UEIP     string  `json:"ue_ip"`
@@ -73,6 +77,7 @@ type oamQoSUpdateRequest struct {
 	GbrUL    string  `json:"gbr_ul,omitempty"`
 	GbrDL    string  `json:"gbr_dl,omitempty"`
 	Arp      oamARP  `json:"arp"`
+	BurstMS  uint64  `json:"burst_ms,omitempty"`
 }
 
 // oamQoSReleaseRequest is the body of POST /nsmf-oam/v1/qos-release. The SMF
@@ -155,6 +160,7 @@ func (e *Enforcer) buildOAMBody(intent adaptiveqos.Intent, decision adaptiveqos.
 		MbrDL:     bitrateBps(decision.MBRDLKbps),
 		GbrUL:     bitrateBps(decision.GBRULKbps),
 		GbrDL:     bitrateBps(decision.GBRDLKbps),
+		BurstMS:   burstDurationMs(intent),
 		Arp: oamARP{
 			PriorityLevel: int32(e.cfg.ARP.PriorityLevel),
 			PreemptCap:    preemptCapString(e.cfg.ARP.PreemptCap),

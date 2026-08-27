@@ -14,20 +14,26 @@
   - GBR=0 (非 GBR 5QI): 全程保持 IDLE 基线 (QoS 不影响吞吐)
 
 接口:
-  POST /api/v1/qos/update   接收 QoSModule (ran 模式) 的 ranapi.Request 体
-  POST /api/v1/qos/release   手动提前释放 (调试用)
-  GET  /metrics              返回当前快照 (collector 拉取)
-  GET  /                     简易状态页
+  POST /api/v1/qos/update          接收 QoSModule (ran 模式) 的 ranapi.Request 体
+  POST /nsmf-oam/v1/qos-update     接收 QoSModule (ngap 模式) 的 SMF OAM 体 (mock-ran 当 SMF)
+  POST /api/v1/qos/release         手动提前释放 (调试用)
+  POST /nsmf-oam/v1/qos-release   SMF 释放端点 (smfenforcer 自动释放调用)
+  GET  /metrics                    返回当前快照 (collector 拉取)
+  GET  /                           简易状态页
 """
 import json
 import math
 import random
+import re
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import argparse
 DEFAULT_PORT = 18081
+
+# smfenforcer bitrateBps 输出 "N bps" (N=kbps*1000), 用于解析 OAM 体的 gbr/mbr
+_BPS_RE = re.compile(r"(\d+)\s*bps", re.IGNORECASE)
 
 # ---- 状态机参数 (锁定) ----
 BASELINE_KBPS = 1500
@@ -152,38 +158,117 @@ def _parse_qos_update(body):
     }
 
 
+def _parse_bps(s):
+    """解析 smfenforcer 的比特率字符串 "N bps" (bitrateBps 输出), 返回 bps 整数。空/0 返回 0。"""
+    if not s:
+        return 0
+    s = str(s).strip()
+    m = _BPS_RE.match(s)
+    if not m:
+        return 0
+    return int(m.group(1))
+
+
+def _parse_smf_oam_update(body):
+    """从 smfenforcer 的 oamQoSUpdateRequest 体提取生效 GBR / q_lvl / burst_ms。
+    字段定义对齐 adaptiveqos/smfenforcer/enforcer.go buildOAMBody:
+      gbr_ul/gbr_dl 为 "N bps" 字符串(由 bitrateBps(kbps)=kbps*1000+" bps" 生成),
+      five_qi 即 q_lvl, ue_ip 用于日志, burst_ms 由 smfenforcer 透传(真实 SMF 忽略此字段)。"""
+    try:
+        req = json.loads(body or b"{}")
+    except Exception:
+        return None
+    gbr_ul_bps = _parse_bps(req.get("gbr_ul", ""))
+    gbr_dl_bps = _parse_bps(req.get("gbr_dl", ""))
+    gbr = max(gbr_ul_bps, gbr_dl_bps) // 1000  # bps -> kbps
+    q_lvl = int(req.get("five_qi", 9) or 9)
+    request_id = req.get("request_id", "")
+    ue_ip = req.get("ue_ip", "")
+    burst_ms = int(req.get("burst_ms", 0) or 0)
+    if burst_ms == 0:
+        burst_ms = DEFAULT_BURST_MS  # OAM 体无 burst_ms 时兜底(smfenforcer 未透传)
+    # SMF 路径无 rnti, 用 ue_ip 末段做 crnti 占位便于日志辨识
+    crnti = 0
+    if ue_ip:
+        try:
+            crnti = int(ue_ip.split(".")[-1])
+        except ValueError:
+            crnti = 0
+    return {
+        "gbr": gbr,
+        "q_lvl": q_lvl,
+        "crnti": crnti,
+        "request_id": request_id,
+        "burst_ms": burst_ms,
+        "ue_ip": ue_ip,
+    }
+
+
+def _apply_parsed(parsed):
+    """把解析出的 QoS 参数写入活跃状态, 触发状态机。ranapi 与 SMF OAM 端点共用。"""
+    with _lock:
+        _state["active"] = {
+            "gbr": parsed["gbr"],
+            "q_lvl": parsed["q_lvl"],
+            "crnti": parsed["crnti"],
+            "request_id": parsed["request_id"],
+            "apply_t": time.time(),
+            "burst_ms": parsed["burst_ms"],
+        }
+    print("[apply] request_id=%s gbr=%dkbps q_lvl=%d burst=%dms crnti=%d"
+          % (parsed["request_id"], parsed["gbr"], parsed["q_lvl"],
+             parsed["burst_ms"], parsed["crnti"]), flush=True)
+
+
 class H(BaseHTTPRequestHandler):
     def do_POST(self):
+        n = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(n) if n > 0 else b""
+
+        # ran 模式: ranapi.Request 格式 (q_gbr_ul/q_lvl/burst_info)
         if self.path == "/api/v1/qos/update":
-            n = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(n) if n > 0 else b""
             parsed = _parse_qos_update(body)
             if parsed is None:
                 self._reply(400, {"status": "REJECTED", "error_code": "INVALID_BODY",
                                   "message": "invalid json body"})
                 return
-            with _lock:
-                _state["active"] = {
-                    "gbr": parsed["gbr"],
-                    "q_lvl": parsed["q_lvl"],
-                    "crnti": parsed["crnti"],
-                    "request_id": parsed["request_id"],
-                    "apply_t": time.time(),
-                    "burst_ms": parsed["burst_ms"],
-                }
-            print("[apply] request_id=%s gbr=%dkbps q_lvl=%d burst=%dms crnti=%d"
-                  % (parsed["request_id"], parsed["gbr"], parsed["q_lvl"],
-                     parsed["burst_ms"], parsed["crnti"]), flush=True)
+            _apply_parsed(parsed)
             # ranapi.Client 期望 {status, error_code, message}; 附 request_id 便于追溯
             self._reply(200, {"status": "ACCEPTED", "request_id": parsed["request_id"],
                               "error_code": "", "message": "applied"})
-        elif self.path == "/api/v1/qos/release":
+            return
+
+        # ngap 模式: mock-ran 当 SMF, 接收 smfenforcer 的 oamQoSUpdateRequest
+        # (ue_ip/five_qi/mbr_ul "N bps"/gbr_ul/burst_ms), 真实模拟由 mock-ran 完成
+        if self.path == "/nsmf-oam/v1/qos-update":
+            parsed = _parse_smf_oam_update(body)
+            if parsed is None:
+                # ProblemDetails 错误格式 (smfenforcer qosUpdateResponse 解析 cause/detail)
+                self._reply(400, {"title": "invalid body", "detail": "invalid json",
+                                  "cause": "INVALID_BODY"})
+                return
+            _apply_parsed(parsed)
+            # smfenforcer qosUpdateResponse 期望: status/request_id/ue_ip/supi/qfi/five_qi/amf_cause
+            self._reply(200, {
+                "status": "ACCEPTED",
+                "request_id": parsed["request_id"],
+                "ue_ip": parsed.get("ue_ip", ""),
+                "supi": "imsi-mock-0001",
+                "qfi": 4,
+                "five_qi": parsed["q_lvl"],
+                "amf_cause": "",
+            })
+            return
+
+        # 释放端点 (两个路径)
+        if self.path in ("/api/v1/qos/release", "/nsmf-oam/v1/qos-release"):
             with _lock:
                 _state["active"] = None
-            print("[release] manual release -> IDLE", flush=True)
+            print("[release] %s -> IDLE" % self.path, flush=True)
             self._reply(200, {"status": "ACCEPTED", "message": "released"})
-        else:
-            self._reply(404, {"error": "not found"})
+            return
+
+        self._reply(404, {"error": "not found"})
 
     def do_GET(self):
         if self.path == "/metrics":
