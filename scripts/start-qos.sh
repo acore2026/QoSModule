@@ -93,6 +93,13 @@ stop_mock_ran() {
     fi
     rm -f "$MOCK_RAN_PID_FILE"
   fi
+  # 兜底: pid 文件丢失但进程还在(异常退出/手工起过)。必须清干净, 否则它会继续
+  # 自报前端, 与 ran-udp 模式的远程基站形成双源。
+  if pgrep -f "ranreporter/mock_ran.py" >/dev/null 2>&1; then
+    pkill -f "ranreporter/mock_ran.py" 2>/dev/null || true
+    sleep 0.3
+    ok "mock-ran 兜底停止 (pkill 遗留实例)"
+  fi
 }
 
 # ---- 子命令: stop / status ----
@@ -242,6 +249,10 @@ case "$MODE" in
   ran-udp)
     info "mode=ran-udp(UDP 直连远程基站): $RAN_UDP_ENDPOINT (ack=$RAN_UDP_ACK)"
     info "  上报: 由远程基站自己 POST 前端, 本机不起任何上报进程"
+    # 强制互斥: 前端 schema 无数据源标识字段, mock-ran 与远程基站同时自报会画出
+    # 无法区分合并的交织曲线。QoSModule 进程异常退出而 mock-ran 存活时, PID_FILE
+    # 检查会放行启动, 故此处显式停掉任何遗留的 mock-ran。
+    stop_mock_ran
     RUN_FLAGS="$COMMON_FLAGS -core-mode ran-udp -ran-udp-endpoint $RAN_UDP_ENDPOINT -ran-udp-ack=$RAN_UDP_ACK -ran-timeout 3s"
     ;;
 
