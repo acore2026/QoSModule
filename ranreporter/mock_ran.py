@@ -18,15 +18,25 @@
   POST /nsmf-oam/v1/qos-update     接收 QoSModule (ngap 模式) 的 SMF OAM 体 (mock-ran 当 SMF)
   POST /api/v1/qos/release         手动提前释放 (调试用)
   POST /nsmf-oam/v1/qos-release   SMF 释放端点 (smfenforcer 自动释放调用)
-  GET  /metrics                    返回当前快照 (collector 拉取)
+  GET  /metrics                    返回当前快照
   GET  /                           简易状态页
+
+自报前端:
+  mock-ran 自己把状态机数据 POST 给前端, 不经任何中间采集器。下发目标自己负责上报——
+  mock-ran 模式由 mock-ran 自报, ran-udp 模式由远程基站自报, 二者互斥故无双源冲突。
+  推送策略与前端可见行为对齐原 collector.py: 窗口每 interval 无条件累积(保证 burst 到来时
+  窗口里已有基线段), 但仅在 active/state_changed/in_tail 且距上次推送 >= push_interval 时
+  POST 整窗; burst 结束后继续推 tail_secs 秒填满前端窗口右侧的恢复段, 再进入空闲静默。
+  --frontend-url 留空则关闭自报, 退化为纯模拟器(仅 /metrics 被动拉取)。
 """
 import json
-import math
 import random
 import re
 import threading
 import time
+import urllib.error
+import urllib.request
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import argparse
@@ -44,6 +54,19 @@ RAMP_UP_MS = 500.0        # 上升窗口
 RAMP_DOWN_LEAD_MS = 300.0  # 下降提前窗口
 TICK_MS = 100             # 状态机采样间隔
 DEFAULT_BURST_MS = 1000   # 请求体无 burst_duration 时的兜底
+
+# ---- 自报前端参数 (默认值对齐原 collector.py, 保证前端可见行为不变) ----
+DEFAULT_FRONTEND_URL = "http://192.168.1.10:28448/api/v1/qos"
+REPORT_INTERVAL = 0.5     # 采样周期秒
+PUSH_INTERVAL = 1.0       # 推送周期秒 (每次发整份窗口)
+WINDOW_SIZE = 30          # 滑动窗口样本数
+TAIL_SECS = 8.0           # burst 结束后继续推送的尾期秒数
+HTTP_TIMEOUT = 5
+
+# 前端是内网直连目标, 绝不能走 http_proxy: urllib.request.urlopen 默认装
+# ProxyHandler(getproxies()), 会继承 shell 里的 http_proxy/https_proxy/all_proxy
+# (.bashrc 硬编码, 宿主 IP 变更后即失效), 导致 POST 全部超时。空 ProxyHandler 与环境解耦。
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 _lock = threading.Lock()
 _state = {
@@ -126,6 +149,84 @@ def _tick_loop():
     while True:
         _tick()
         time.sleep(TICK_MS / 1000.0)
+
+
+def post_metrics(url, samples):
+    """POST {"metrics":[...]} 给前端, 返回 (http_status, body)。绕开环境代理。"""
+    body = json.dumps({"metrics": samples}).encode()
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", "application/json")
+    try:
+        with _OPENER.open(req, timeout=HTTP_TIMEOUT) as r:
+            return r.status, r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8", "replace")
+    except Exception as e:
+        return 0, str(e)
+
+
+def _push_loop(url, interval, push_interval, window_size, tail_secs):
+    """自报前端。推送策略逐行对齐原 collector.py run_loop, 前端可见行为完全一致:
+      - 窗口每 interval 无条件累积 -> burst 到来时窗口里已有 ~15s 基线段, 前端能画出完整梯形
+      - should_push = active(alive) or state_changed(q_lvl/gbr/alive 变了) or in_tail
+      - rate_ok     = 距上次推送 >= push_interval
+      - burst 结束(alive True->False)启动 tail, 继续推 tail_secs 秒填满前端窗口右侧再冻结
+      - last_alive 仅在实际推送时更新(与 collector 一致, 勿"修正", 否则前端节奏会变)
+    与 collector 唯一差别: 空闲静默只在进入静默那一刻打一次日志(原实现每秒一行, 日志涨到 MB 级)。"""
+    window = deque(maxlen=window_size)
+    last_push = 0.0
+    last_pushed = None
+    last_alive = None
+    tail_until = 0.0
+    silent_logged = False
+    next_t = time.time()
+    print("[report] 自报已启动 -> %s (interval=%.2fs push=%.2fs window=%d tail=%.1fs)"
+          % (url, interval, push_interval, window_size, tail_secs), flush=True)
+    while True:
+        next_t += interval
+        sleep_for = next_t - time.time()
+        if sleep_for > 0:
+            time.sleep(sleep_for)
+        with _lock:
+            snap = dict(_state["current"])
+        alive = bool(snap.get("alive", False))
+        s = {
+            "timestamp": int(time.time() * 1000),
+            "sendrate_kbps": int(snap.get("sendrate_kbps", 0) or 0),
+            "gbr_kbps": int(snap.get("gbr_kbps", 0) or 0),
+            "q_lvl": int(snap.get("q_lvl", 9) or 9),
+        }
+        window.append(s)
+        now = time.time()
+        active = alive
+        state_changed = (last_pushed is None or
+                         s["q_lvl"] != last_pushed["q_lvl"] or
+                         s["gbr_kbps"] != last_pushed["gbr_kbps"] or
+                         alive != last_alive)
+        if not alive and alive != last_alive:
+            tail_until = now + tail_secs
+        in_tail = now < tail_until
+        should_push = active or state_changed or in_tail
+        rate_ok = last_pushed is None or now - last_push >= push_interval
+        if should_push and rate_ok:
+            st, resp = post_metrics(url, list(window))
+            if st == 200:
+                reason = "变更触发" if state_changed else ("tail填满" if in_tail and not active else "活动持续")
+                print("[report] ok alive=%s crnti=%s sendrate=%dkbps gbr=%dkbps qlvl=%d (push %d samples, %s)"
+                      % (alive, snap.get("crnti"), s["sendrate_kbps"], s["gbr_kbps"],
+                         s["q_lvl"], len(window), reason), flush=True)
+            else:
+                print("[report] ERR %s %s" % (st, resp[:200]), flush=True)
+            last_push = now
+            last_pushed = s
+            last_alive = alive
+            silent_logged = False
+        elif rate_ok and not should_push:
+            last_push = now
+            if not silent_logged:
+                print("[report] idle alive=%s sendrate=%dkbps gbr=%dkbps qlvl=%d (进入空闲静默)"
+                      % (alive, s["sendrate_kbps"], s["gbr_kbps"], s["q_lvl"]), flush=True)
+                silent_logged = True
 
 
 def _parse_qos_update(body):
@@ -304,12 +405,25 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=DEFAULT_PORT, help="监听端口(默认 %d)" % DEFAULT_PORT)
     ap.add_argument("--host", default="0.0.0.0", help="监听地址")
+    ap.add_argument("--frontend-url", default=DEFAULT_FRONTEND_URL,
+                    help="前端上报目标(默认 %s); 留空则关闭自报, 退化为纯模拟器" % DEFAULT_FRONTEND_URL)
+    ap.add_argument("--interval", type=float, default=REPORT_INTERVAL, help="采样周期秒(默认0.5)")
+    ap.add_argument("--push-interval", type=float, default=PUSH_INTERVAL, help="推送周期秒(默认1.0,每次发整份窗口)")
+    ap.add_argument("--window", type=int, default=WINDOW_SIZE, help="滑动窗口样本数(默认30)")
+    ap.add_argument("--tail-secs", type=float, default=TAIL_SECS,
+                    help="burst 结束后继续推送的尾期秒数(默认8.0, 填满前端窗口右侧恢复段后再冻结)")
     args = ap.parse_args()
     listen = (args.host, args.port)
     t = threading.Thread(target=_tick_loop, daemon=True)
     t.start()
     print("mock-ran listening on %s:%d (IDLE baseline=%dkbps, STEADY=GBR*%.2f, ramp_up=%.0fms ramp_down_lead=%.0fms)"
           % (listen[0], listen[1], BASELINE_KBPS, STEADY_RATIO, RAMP_UP_MS, RAMP_DOWN_LEAD_MS), flush=True)
+    if args.frontend_url:
+        threading.Thread(target=_push_loop, daemon=True,
+                         args=(args.frontend_url, args.interval, args.push_interval,
+                               args.window, args.tail_secs)).start()
+    else:
+        print("[report] 未配置 --frontend-url, 自报关闭(纯模拟器模式, 仅 /metrics 被动拉取)", flush=True)
     ThreadingHTTPServer(listen, H).serve_forever()
 
 

@@ -5,7 +5,7 @@ set -e
 #  QoS 模块管理脚本 — 启动/停止/状态
 #
 #  用法:
-#    ./start-qos.sh <ran|ran-udp|mock-ran|auto>   启动(自动后台)
+#    ./start-qos.sh <ran-udp|mock-ran>         启动(自动后台)
 #    ./start-qos.sh stop                       停止
 #    ./start-qos.sh status                     查看状态
 #    ./start-qos.sh restart <mode>             重启
@@ -13,33 +13,33 @@ set -e
 #  地址默认值已填入(改脚本顶部即可)
 #  环境变量仍可覆盖(如: RAN_UDP_ENDPOINT=10.x.x.x:9999 ./start-qos.sh ran-udp)
 #
-#  注: SMF/ngap 方案已废弃, 不再提供 mode=ngap, auto 也不再带 SMF 第3档。
+#  注: 上报由下发目标自己负责, 不再有中间采集器——
+#      mock-ran 模式 → mock-ran 自报前端; ran-udp 模式 → 远程基站自报前端。
+#      二者互斥, 故前端不会同时收到两路数据。
+#      SMF/ngap 方案已废弃; auto 三档回退已退役(它会导致两个上报源同时活着)。
 # ============================================================
 
 # ============================================================
 #  默认地址(按需修改这里)
 #
 #  各模式需要的地址:
-#    ran       → QOS_BIND + RAN_URL (HTTP 直连 gNB; RAN_URL 改指 mock-ran 也行)
-#    ran-udp   → QOS_BIND + RAN_UDP_ENDPOINT (+ RAN_UDP_ACK)
-#    mock-ran  → QOS_BIND + MOCK_RAN_URL (自动起 mock-ran)
-#    auto      → QOS_BIND + RAN_UDP_ENDPOINT + MOCK_RAN_URL (UDP 真 gNB → mock-ran 回退)
+#    ran-udp   → QOS_BIND + RAN_UDP_ENDPOINT (+ RAN_UDP_ACK); 远程基站自报前端
+#    mock-ran  → QOS_BIND + MOCK_RAN_URL + FRONTEND_URL (自动起 mock-ran, 由它自报前端)
 # ============================================================
 
 # ---- 公共(所有模式) ----
 QOS_BIND="${QOS_BIND:-0.0.0.0:7400}"           # QoS 模块 UDP 监听(收 MASQUE 请求)
 
-# ---- mode=ran(HTTP 直连 gNB) / 也可改指 mock-ran ----
-RAN_URL="${RAN_URL:-http://10.88.120.212:80/api/v1/qos/update}"  # 真 gNB HTTP
+# ---- mode=ran-udp(UDP 直连远程基站) ----
+RAN_UDP_ENDPOINT="${RAN_UDP_ENDPOINT:-10.88.0.3:9999}"  # 远程基站 UDP 地址
+RAN_UDP_ACK="${RAN_UDP_ACK:-1}"                          # 基站是否回应答(0=不等,1=等)
 
-# ---- mode=ran-udp(UDP 直连 gNB) ----
-RAN_UDP_ENDPOINT="${RAN_UDP_ENDPOINT:-10.88.0.3:9999}"  # gNB UDP 地址
-RAN_UDP_ACK="${RAN_UDP_ACK:-1}"                          # gNB 是否回应答(0=不等,1=等)
-
-# ---- mock-ran(本地模拟 gNB; mode=mock-ran / auto 第2档用) ----
+# ---- mock-ran(本地模拟 gNB) ----
 MOCK_RAN_PORT="${MOCK_RAN_PORT:-18081}"
 MOCK_RAN_URL="${MOCK_RAN_URL:-http://127.0.0.1:${MOCK_RAN_PORT}/api/v1/qos/update}"  # target -ran-url 用(带路径)
-MOCK_RAN_BASE="${MOCK_RAN_BASE:-http://127.0.0.1:${MOCK_RAN_PORT}}"                    # collector 用(base, 它自拼 /metrics)
+
+# ---- 前端上报目标(mock-ran 自报用; ran-udp 模式由远程基站自己报, 不经此处) ----
+FRONTEND_URL="${FRONTEND_URL:-http://192.168.1.10:28448/api/v1/qos}"
 # ---- 默认地址结束 ----
 
 # ---- 运行时文件 ----
@@ -52,14 +52,6 @@ MOCK_RAN_SCRIPT="$SCRIPT_DIR/../ranreporter/mock_ran.py"
 MOCK_RAN_PID_FILE="/tmp/qos-mock-ran.pid"
 MOCK_RAN_LOG="$SCRIPT_DIR/../logs/mock-ran.log"
 
-# ---- collector(RANReporter 指标上报)----
-# 与 restart-all.sh step 10 共用 pid 文件 + pkill 去重, 谁后跑谁覆盖, 不重复。
-COLLECTOR="$SCRIPT_DIR/../ranreporter/collector.py"
-COLLECTOR_LOG="$SCRIPT_DIR/../logs/collector.log"
-COLLECTOR_PID_FILE="/tmp/ranreporter-collector.pid"
-COLLECTOR_URL="${COLLECTOR_URL:-http://192.168.1.10:28448/api/v1/qos}"  # 前端上报目标
-GNB_HOST="${GNB_HOST:-10.88.120.212}"   # collector real 档 SSH 真 gNB 用
-
 RED='\033[0;31m'; GREEN='\033[0;32m'; BLUE='\033[0;34m'; YELLOW='\033[1;33m'; NC='\033[0m'
 ok()   { echo -e "${GREEN}  ✓ $1${NC}"; }
 info() { echo -e "${BLUE}  ℹ $1${NC}"; }
@@ -67,28 +59,27 @@ warn() { echo -e "${YELLOW}  ⚠ $1${NC}"; }
 fail() { echo -e "${RED}  ✗ $1${NC}"; exit 1; }
 
 # ---- mock-ran 子进程管理 ----
-# 判断 URL 是否指向本机 mock-ran(host=127.0.0.1|localhost 且 port=MOCK_RAN_PORT)
-url_uses_mock_ran() {
-  case "$1" in
-    *127.0.0.1:${MOCK_RAN_PORT}*|*localhost:${MOCK_RAN_PORT}*) return 0;;
-    *) return 1;;
-  esac
-}
 start_mock_ran() {
   if [ -f "$MOCK_RAN_PID_FILE" ] && kill -0 "$(cat "$MOCK_RAN_PID_FILE")" 2>/dev/null; then
     info "mock-ran 已在运行 (pid=$(cat "$MOCK_RAN_PID_FILE"), :$MOCK_RAN_PORT)"
     return 0
   fi
-  command -v python3 >/dev/null 2>&1 || { warn "无 python3, 跳过 mock-ran (auto 第2档将失败)"; return 1; }
+  command -v python3 >/dev/null 2>&1 || { warn "无 python3, 无法起 mock-ran"; return 1; }
   [ -f "$MOCK_RAN_SCRIPT" ] || { warn "mock-ran 脚本不存在: $MOCK_RAN_SCRIPT"; return 1; }
   mkdir -p "$(dirname "$MOCK_RAN_LOG")"
-  nohup python3 "$MOCK_RAN_SCRIPT" --port "$MOCK_RAN_PORT" > "$MOCK_RAN_LOG" 2>&1 &
+  # env -u: 剥掉继承来的代理变量。mock-ran 自报的前端是内网直连目标, 走 http_proxy 必然超时
+  # (.bashrc 里硬编码的代理 IP 会随宿主变更失效)。mock_ran.py 内部已用空 ProxyHandler 兜底,
+  # 此处是双保险。
+  env -u http_proxy -u https_proxy -u all_proxy \
+    nohup python3 "$MOCK_RAN_SCRIPT" --port "$MOCK_RAN_PORT" \
+      --frontend-url "$FRONTEND_URL" > "$MOCK_RAN_LOG" 2>&1 &
   echo $! > "$MOCK_RAN_PID_FILE"
   sleep 0.6
   if kill -0 "$(cat "$MOCK_RAN_PID_FILE")" 2>/dev/null; then
-    ok "mock-ran 已启动 (pid=$(cat "$MOCK_RAN_PID_FILE"), :$MOCK_RAN_PORT, 日志 $MOCK_RAN_LOG)"
+    ok "mock-ran 已启动 (pid=$(cat "$MOCK_RAN_PID_FILE"), :$MOCK_RAN_PORT, 自报 -> $FRONTEND_URL)"
+    info "日志: tail -f $MOCK_RAN_LOG"
   else
-    warn "mock-ran 启动失败, 查看 $MOCK_RAN_LOG (auto 第2档回退将失败)"
+    warn "mock-ran 启动失败, 查看 $MOCK_RAN_LOG"
   fi
 }
 stop_mock_ran() {
@@ -104,55 +95,45 @@ stop_mock_ran() {
   fi
 }
 
-# ---- collector 子进程管理 ----
-# collector flag 按模式选:
-#   mock-ran → --mock-ran(静态读 mock /metrics, 含 IDLE 基线; 该模式本就纯 mock 无需跟随)
-#   其余     → --auto-ran(每轮读 qos-module.log 跟随实际生效档 mock/real)
-# ran-udp 模式跳过(针对模拟 gNB, 采真基站 trace 无意义)——由调用方判定, 本函数不判。
-# start-qos.sh 自身 cmdline 不含 "ranreporter/collector.py", pkill 安全不误杀自己。
-start_collector() {
-  command -v python3 >/dev/null 2>&1 || { warn "无 python3, 跳过 collector"; return 1; }
-  [ -f "$COLLECTOR" ] || { warn "collector 脚本不存在: $COLLECTOR"; return 1; }
-  # 幂等: 已在运行就不重起(避免与 restart-all.sh step 10 / 多次调用重复起)
-  if [ -f "$COLLECTOR_PID_FILE" ] && kill -0 "$(cat "$COLLECTOR_PID_FILE")" 2>/dev/null; then
-    info "collector 已在运行 (pid=$(cat "$COLLECTOR_PID_FILE"))"
-    return 0
-  fi
-  mkdir -p "$(dirname "$COLLECTOR_LOG")"
-  local flag="--auto-ran"
-  [ "$1" = "mock-ran" ] && flag="--mock-ran"
-  nohup python3 "$COLLECTOR" $flag "$MOCK_RAN_BASE" --host "$GNB_HOST" --url "$COLLECTOR_URL" > "$COLLECTOR_LOG" 2>&1 &
-  echo $! > "$COLLECTOR_PID_FILE"
-  sleep 1
-  if kill -0 "$(cat "$COLLECTOR_PID_FILE")" 2>/dev/null; then
-    ok "collector 已启动 (pid=$(cat "$COLLECTOR_PID_FILE"), $flag $MOCK_RAN_BASE, 日志 $COLLECTOR_LOG)"
-  else
-    warn "collector 启动失败, 查看 $COLLECTOR_LOG"
-  fi
-}
-stop_collector() {
-  if [ -f "$COLLECTOR_PID_FILE" ]; then
-    PID=$(cat "$COLLECTOR_PID_FILE")
-    if kill -0 "$PID" 2>/dev/null; then
-      kill "$PID" 2>/dev/null
-      ok "collector 已停止 (pid=$PID)"
-    else
-      warn "collector pid=$PID 已不存在"
-    fi
-    rm -f "$COLLECTOR_PID_FILE"
-  fi
-  # 兜底: pid 文件丢失但进程还在
-  if pkill -f "QoSModule/ranreporter/collector.py" 2>/dev/null; then
-    ok "collector 兜底停止 (pkill)"
-  fi
-}
-
 # ---- 子命令: stop / status ----
 CMD="${1:-}"
 
+usage() {
+  echo "=========================================="
+  echo "  QoS 模块管理脚本"
+  echo "=========================================="
+  echo ""
+  echo "用法:"
+  echo "  $0 <ran-udp|mock-ran>          启动(自动后台)"
+  echo "  $0 stop                        停止"
+  echo "  $0 status                      查看状态"
+  echo "  $0 restart <mode>              重启"
+  echo ""
+  echo "模式(二选一, 上报由下发目标自己负责):"
+  echo "  ran-udp   — UDP 直连远程基站; 远程基站自己上报前端"
+  echo "  mock-ran  — HTTP 直连本地 mock-ran; mock-ran 自己上报前端"
+  echo ""
+  echo "默认地址(改脚本顶部,或用环境变量覆盖):"
+  echo "  远程基站 UDP: $RAN_UDP_ENDPOINT (ack=$RAN_UDP_ACK)"
+  echo "  mock-ran:     $MOCK_RAN_URL (端口 $MOCK_RAN_PORT)"
+  echo "  前端上报:     $FRONTEND_URL (仅 mock-ran 模式用)"
+  echo ""
+  echo "已退役: mode=ran(默认目标 10.88.120.212 已下线)、mode=auto(三档回退会导致"
+  echo "        远程基站与 mock-ran 两个上报源同时活着, 前端 schema 无源标识无法区分)、"
+  echo "        mode=ngap/SMF、中间采集器 collector.py。"
+  echo ""
+  echo "日志: tail -f $LOG_FILE"
+  echo "PID:  cat $PID_FILE"
+}
+
+# 无参调用直接出 usage: 否则会被后面的"已在运行"检查挡住, 模块跑着时永远看不到帮助
+if [ -z "$CMD" ]; then
+  usage
+  exit 0
+fi
+
 case "$CMD" in
   stop)
-    stop_collector
     stop_mock_ran
     if [ -f "$PID_FILE" ]; then
       PID=$(cat "$PID_FILE")
@@ -198,18 +179,15 @@ case "$CMD" in
     fi
     if [ -f "$MOCK_RAN_PID_FILE" ] && kill -0 "$(cat "$MOCK_RAN_PID_FILE")" 2>/dev/null; then
       ok "mock-ran 运行中 (pid=$(cat "$MOCK_RAN_PID_FILE"), :$MOCK_RAN_PORT, 日志 $MOCK_RAN_LOG)"
+      case "$(ps -o cmd= -p "$(cat "$MOCK_RAN_PID_FILE")" 2>/dev/null)" in
+        *--frontend-url*)
+          fe="$(ps -o cmd= -p "$(cat "$MOCK_RAN_PID_FILE")" | sed -n 's/.*--frontend-url \([^ ]*\).*/\1/p')"
+          [ -n "$fe" ] && info "自报前端: $fe" || info "自报前端: 未配置(纯模拟器)"
+          ;;
+        *) info "自报前端: 未配置(纯模拟器)" ;;
+      esac
     else
       info "mock-ran 未运行"
-    fi
-    if [ -f "$COLLECTOR_PID_FILE" ] && kill -0 "$(cat "$COLLECTOR_PID_FILE")" 2>/dev/null; then
-      cflag="--auto-ran"
-      case "$(ps -o cmd= -p "$(cat "$COLLECTOR_PID_FILE")" 2>/dev/null)" in
-        *--mock-ran*) cflag="--mock-ran" ;;
-        *--smf-mock-ran*) cflag="--smf-mock-ran" ;;
-      esac
-      ok "collector 运行中 (pid=$(cat "$COLLECTOR_PID_FILE"), $cflag, 日志 $COLLECTOR_LOG)"
-    else
-      info "collector 未运行"
     fi
     exit 0
     ;;
@@ -225,6 +203,17 @@ esac
 
 # ---- 启动逻辑 ----
 MODE="$CMD"
+
+# 先校验模式再查"已在运行": 否则传错模式时只会看到"已在运行", 拿不到真正的错误原因
+case "$MODE" in
+  ran-udp|mock-ran) ;;
+  *)
+    warn "未知模式: $MODE (支持 ran-udp|mock-ran)"
+    echo ""
+    usage
+    exit 1
+    ;;
+esac
 
 # 编译(如果二进制不存在)
 if [ ! -f "$BINARY" ]; then
@@ -250,58 +239,26 @@ COMMON_FLAGS="$COMMON_FLAGS -dl-bler-upper 0.01 -ul-bler-upper 0.01 -dl-smooth 0
 COMMON_FLAGS="$COMMON_FLAGS -q-cap 1 -q-vul 0"
 
 case "$MODE" in
-  ran)
-    info "mode=ran(HTTP 直连 gNB): $RAN_URL"
-    if url_uses_mock_ran "$RAN_URL"; then start_mock_ran; fi
-    RUN_FLAGS="$COMMON_FLAGS -core-mode ran -ran-url $RAN_URL -ran-timeout 3s"
-    ;;
-
   ran-udp)
-    info "mode=ran-udp(UDP 直连 gNB): $RAN_UDP_ENDPOINT (ack=$RAN_UDP_ACK)"
+    info "mode=ran-udp(UDP 直连远程基站): $RAN_UDP_ENDPOINT (ack=$RAN_UDP_ACK)"
+    info "  上报: 由远程基站自己 POST 前端, 本机不起任何上报进程"
     RUN_FLAGS="$COMMON_FLAGS -core-mode ran-udp -ran-udp-endpoint $RAN_UDP_ENDPOINT -ran-udp-ack=$RAN_UDP_ACK -ran-timeout 3s"
     ;;
 
   mock-ran)
     info "mode=mock-ran(HTTP 直连 mock-ran): $MOCK_RAN_URL"
+    info "  上报: mock-ran 自报 -> $FRONTEND_URL"
     start_mock_ran
+    # 注: mock-ran 模式在二进制层面就是 ran 模式(-core-mode ran), 只是 -ran-url 指向本地 mock。
+    # Go 侧 ModeRAN 因此必须保留, 不存在 -core-mode mock-ran。
     RUN_FLAGS="$COMMON_FLAGS -core-mode ran -ran-url $MOCK_RAN_URL -ran-timeout 3s"
     ;;
 
-  auto)
-    info "mode=auto(UDP 真 gNB → mock-ran 两档回退, SMF 已废弃)"
-    info "  UDP:      $RAN_UDP_ENDPOINT (ack=$RAN_UDP_ACK, 需开 ack 才能因无回包触发回退)"
-    info "  mock-ran: $MOCK_RAN_URL"
-    # auto 第2档是 mock-ran, 必须先起来, 否则 UDP 失败后无回退
-    start_mock_ran
-    RUN_FLAGS="$COMMON_FLAGS -core-mode auto -ran-url $MOCK_RAN_URL -ran-udp-endpoint $RAN_UDP_ENDPOINT -ran-udp-ack=$RAN_UDP_ACK -ran-timeout 3s"
-    ;;
-
   *)
-    echo "=========================================="
-    echo "  QoS 模块管理脚本"
-    echo "=========================================="
+    warn "未知模式: $MODE (支持 ran-udp|mock-ran)"
     echo ""
-    echo "用法:"
-    echo "  $0 <ran|ran-udp|mock-ran|auto>    启动(自动后台)"
-    echo "  $0 stop                        停止"
-    echo "  $0 status                      查看状态"
-    echo "  $0 restart <mode>              重启"
-    echo ""
-    echo "模式:"
-    echo "  ran       — HTTP 直连 gNB (POST /api/v1/qos/update); RAN_URL 指 mock-ran 时自动起 mock-ran"
-    echo "  ran-udp   — UDP 直连 gNB (同 JSON,走 UDP)"
-    echo "  mock-ran  — HTTP 直连 mock-ran (本地模拟 gNB, 自动起 mock-ran)"
-    echo "  auto      — UDP 真 gNB → mock-ran 两档回退 (自动起 mock-ran 作第2档; SMF 已废弃)"
-    echo ""
-    echo "默认地址(改脚本顶部,或用环境变量覆盖):"
-    echo "  gNB HTTP:   $RAN_URL"
-    echo "  gNB UDP:    $RAN_UDP_ENDPOINT"
-    echo "  mock-ran:   $MOCK_RAN_URL (端口 $MOCK_RAN_PORT)"
-    echo "  collector:  $COLLECTOR_URL (--auto-ran; ran-udp 模式不起)"
-    echo ""
-    echo "日志: tail -f $LOG_FILE"
-    echo "PID:  cat $PID_FILE"
-    exit 0
+    usage
+    exit 1
     ;;
 esac
 
@@ -321,11 +278,8 @@ if kill -0 "$PID" 2>/dev/null; then
     info "日志: tail -f $LOG_FILE"
     info "停止: $0 stop"
     info "状态: $0 status"
-    # collector: ran-udp 跳过(模拟 gNB 无真基站 trace); 其余模式起 collector
-    if [ "$MODE" != "ran-udp" ]; then
-      start_collector "$MODE"
-    else
-      info "mode=ran-udp 跳过 collector (模拟 gNB, 采真基站 trace 无意义)"
+    if [ "$MODE" = "ran-udp" ]; then
+      info "上报由远程基站($RAN_UDP_ENDPOINT)自己负责, 本机无上报进程"
     fi
 else
     fail "启动失败,查看日志: $LOG_FILE"
