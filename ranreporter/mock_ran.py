@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""mock-ran: 模拟 gNB 的 QoS 下发接收端 + 实时 sendrate 状态机。
+"""mock-ran: 模拟 gNB 的 QoS 下发接收端 + 实时 sendrate 状态机 + 前端自报。
 
-供 collector.py --mock-ran 模式本地联调用。替代真实 gNB 的 odi tracebuff。
+QoSModule mock-ran 模式的下发目标, 并自己把状态机数据 POST 给前端(不经中间采集器)。
+ran-udp 模式下则由远程基站自己上报, 二者互斥, 前端不会同时收到两路数据。
 
 行为:
   - 无 QoS 下发时 (IDLE):     sendrate ~ 1500 ± N(0,60) kbps

@@ -4,70 +4,60 @@ QoSModule 接收 MASQUE Proxy 转发的 UDP QoS 请求，将业务突发需求�
 
 ## 当前状态
 
-更新时间：2026-08-20。
+更新时间：2026-09-10。
 
 | 能力 | 状态 | 说明 |
 | --- | --- | --- |
 | MASQUE UDP Target | 已实现 | 解析 `CLIENT-IP`，支持可靠信封、去重缓存和原路回包 |
 | QoS 请求校验与策略计算 | 已实现 | UL 必选、DL 成对可选，按静态范围裁剪 |
-| gNB HTTP 下发 | 已实现 | `ranapi.Client` 调用 `POST /api/v1/qos/update`，适用于开放 gNB 和 Mock RAN |
-| SMF 外挂下发（方案 A） | 已实现并端到端验证 | `smfenforcer` 调用 fork SMF `/nsmf-oam/v1/qos-update`，经 PFCP/N1N2/NGAP 到 gNB 建 DRB |
+| gNB HTTP 下发 | 已实现 | `ranapi.Client` 调用 `POST /api/v1/qos/update`，当前部署指向本地 mock-ran |
+| gNB UDP 下发 | 已实现 | `udpranenforcer` 调用远程基站 `10.88.0.3:9999`，可选等 ack |
+| mock-ran 自报前端 | 已实现 | `ranreporter/mock_ran.py` 内置 pusher 线程，模拟空口状态机并直接 POST 前端 |
+| SMF 外挂下发（方案 A） | 已实现但已废弃 | `smfenforcer` 代码与测试保留，部署脚本不再提供 `ngap` 入口 |
 | AF/PCF 下发（方案 B） | 已移除 | 原 `afenforcer` 因 free5GC PCF/SMF 链路 panic/重复 URR 不通，已删除，由方案 A 取代 |
+| 中间采集器 collector.py | 已移除 | 上报责任下放到下发目标自己；原 SSH→odi tracebuff 采集链路（含 `10.88.120.212`）整体退役 |
 | 直接发送 NGAP | 未实现，也不应由本模块直接实现 | NGAP 应由 AMF 向 gNB 发送 |
 | GTP-U 自定义扩展头传 QoS JSON | 未实现且不属于当前方案 | 当前基站通过标准 NGAP 接收 QoS 修改 |
 
-当前仓库实际支持的下发模式为：
+当前**部署脚本**（`scripts/start-qos.sh`、`/home/core/restart-all.sh`）只暴露两种模式，二选一：
 
-- `ran`：调用 gNB HTTP API。
-- `ngap`：调用 SMF OAM Enforcer（方案 A），由 SMF 经 AMF 触发 NGAP。该名称不表示 Target 直接发送 NGAP。
-- `auto`：三档独立回退 `ran-udp → ran(mock-ran) → ngap(SMF OAM)`。UDP(真 gNB) 失败回退 mock-ran(本地 HTTP, ranapi `/api/v1/qos/update`), mock-ran 失败再回退真 SMF(`/nsmf-oam/v1/qos-update`); mock-ran 与真 SMF 端点/格式分离。需 `-ran-udp-ack=1`, 否则 UDP fire-and-forget 永远"成功"不触发回退。
+- `ran-udp`：UDP 直连远程基站（默认 `10.88.0.3:9999`），下发后由**远程基站自己上报前端**。
+- `mock-ran`：HTTP 直连本地 mock-ran（`127.0.0.1:18081`），下发后由 **mock-ran 自己上报前端**。
 
-### auto 模式回退时延
+Go 侧 `routerenforcer` 仍保留 `ran`/`ngap`/`auto` 三种 Mode（`router_test.go` 有 7 个 auto 测试覆盖），但部署脚本不再提供入口：
 
-auto 是**逐请求同步重试、无状态记忆、无熔断**（`adaptiveqos/routerenforcer/router.go` 的 `ModeAuto`）：每个请求都从第 1 档 UDP 重新开始，不记录上次结果，不缓存"哪档当前可用"。
-
-实测延迟（参考值）：
-
-| 环节 | 延迟 |
+| 已退役模式 | 退役原因 |
 | --- | --- |
-| mock-ran POST（本地 HTTP + 内存状态） | ~2ms |
-| UDP 死端口 ack 超时（`-ran-timeout` 默认 3s） | ~3000ms |
+| `ran` | 脚本默认目标 `10.88.120.212:80` 已下线。注意 `mock-ran` 模式内部仍用 `-core-mode ran`，只是 `-ran-url` 指向本地 mock——不存在 `-core-mode mock-ran` |
+| `ngap` / SMF 外挂 | 方案 A 已废弃 |
+| `auto` | 三档回退会让远程基站与 mock-ran **两个上报源同时活着**，而前端 schema 无数据源标识字段，两源同推会画出无法区分合并的交织曲线。另外 auto 逐请求同步重试、无状态记忆、无熔断，第 1 档 UDP 不通时每请求都要先吃满 `-ran-timeout`（默认 3s）空等才回退，单请求 ≈3s 而 mock-ran 那步只占 ~2ms（0.07%） |
 
-gNB 离线时单请求时序：
+### 上报机制
 
-```
-t=0~3s   第1档 UDP: Write(快) → Read 等回包 → 等 ran-timeout 超时 ❌
-t=3s     回退第2档 mock-ran: POST localhost:18081 → ~2ms ✅
-t≈3s     返回 ACCEPTED
-```
+**上报责任属于下发目标自己，本机不跑任何中间采集器。**
 
-单请求总延迟 ≈ 3s，其中 mock-ran 那步只占 ~0.07%，99.93% 花在 UDP 空等上。**mock-ran 步骤本身再快（~2ms）也救不了——前面有 `ran-timeout` 的 UDP 空等挡着**。
-
-> 反直觉：gNB 长期离线时，auto 模式比直接走 `ngap`（真 SMF，几十~几百 ms）还慢，因为每请求都先吃满一次 UDP 超时才回退。
-
-缓解方案：
-
-| 方案 | 做法 | gNB 离线时单请求 | 代价 |
-| --- | --- | --- | --- |
-| 调小超时 | auto 时 `-ran-timeout 0.5s` | ~0.5s | 真 gNB 回包慢时可能误判失败 |
-| 熔断（未实现） | UDP 连续失败 N 次后冷却期跳过 UDP，首请求直走 mock-ran，定期复探恢复 | ~2ms | 需加熔断器状态代码 |
-
-> 当前未实现熔断。若 gNB 离线场景对延迟敏感：调试时直接用 `ran` 模式指向 mock-ran（省去 UDP 空等），或调小 `-ran-timeout`。
-
-### 采集启动与 QoS 模式关联
-
-`ranreporter` 采集器的启动与否由 QoSModule 的启动模式决定（`restart-all.sh` step 10 实现，复刻 `routerenforcer` 的 `auto` 回退逻辑 `ran→udp→ngap`）：
-
-| QoS 模式 | 采集器 | 说明 |
+| 模式 | 下发 | 上报 |
 | --- | --- | --- |
-| `ngap` | **启动** | 经 SMF/NGAP 下发，gNB L2 trace 不暴露 5QI=2/GFBR，采集器用 QoSModule 日志取 q_lvl/gbr + 基站 trace 取 sendrate |
-| `ran` | **启动** | HTTP 直连 gNB，同上 |
-| `ran-udp` | **不启动** | UDP 直连模拟 gNB（如 UERANSIM），采集真实基站无意义 |
-| `auto` | 按实际回退 | 探 UDP 端点（默认 `10.88.0.3:9999`）有回包 → ran-udp（不启动）；否则 → ngap（启动） |
+| `ran-udp` | QoSModule → UDP `10.88.0.3:9999` | 远程基站自己 POST 前端 |
+| `mock-ran` | QoSModule → HTTP `127.0.0.1:18081/api/v1/qos/update` | mock-ran 进程自己 POST 前端 |
 
-可通过环境变量覆盖：`QOS_MODE=ngap|ran|ran-udp|auto ./restart-all.sh`。
+前端契约（`POST {FRONTEND_URL}`，默认 `http://192.168.1.10:28448/api/v1/qos`）：
 
-> 技术根因：基站 duapp0 的 L2 trace 只到 DRB 级（5QI=5 默认承载），不暴露专载 5QI=2 和 GFBR（CallP 只把 AMBR 透到 L2，且判非法用默认值）。故 ngap/ran 模式下采集器必须用 QoSModule 下发日志作为 q_lvl/gbr 的真值来源，sendrate 仍走基站 trace。详见 `ranreporter/REPORTING.md`。
+```json
+{"metrics": [{"timestamp": 1720000000000, "sendrate_kbps": 4900, "gbr_kbps": 5459, "q_lvl": 3}]}
+```
+
+成功 `200 {"ok":true,"type":"metrics"}`；非法 `400 {"error":"..."}`（字段缺失/类型错/空 metrics 数组）。
+
+mock-ran 的推送策略（`ranreporter/mock_ran.py` 的 `_push_loop`）：
+
+- 窗口每 `--interval`（0.5s）**无条件累积**，保证 burst 到来时窗口里已有 ~15s 基线段，前端能画出完整梯形
+- 仅在 `active(alive)` 或 `state_changed(q_lvl/gbr/alive 变了)` 或 `in_tail`，且距上次推送 ≥ `--push-interval`（1s）时，POST **整窗**（`--window`，默认 30 条）
+- burst 结束（`alive` True→False）后继续推 `--tail-secs`（8s）填满前端窗口右侧的恢复段，再进入空闲静默
+- 出站用空 `ProxyHandler`：`urllib` 默认继承 shell 的 `http_proxy`，代理 IP 失效会导致 POST 全部超时
+- `--frontend-url` 留空则关闭自报，mock-ran 退化为纯模拟器（仅 `/metrics` 被动拉取）
+
+mock-ran 模拟的空口行为：IDLE 基线 `1500±N(0,60)` kbps；下发后 `RAMP_UP`（0~0.5s 渐升）→ `STEADY`（`GBR×0.9 ±N(0,30)`）→ `RAMP_DOWN`（burst 结束前 0.3s 渐降）→ 到 `burst_ms` 自动释放回 IDLE；`GBR=0`（非 GBR 5QI）全程维持基线。
 
 ## 代码结构
 
@@ -90,29 +80,26 @@ target/target/                   MASQUE 后端 UDP 服务
     ├── mockran/                 Mock RAN
     └── mockpcf/                 Mock PCF
 
-ranreporter/                     基站实时指标采集器 (Python)
-├── collector.py                 主程序: SSH→odi tracebuff→sendrate + QoSModule 日志→q_lvl/gbr→POST 前端
-├── mock_frontend.py             前端接收端 mock (联调用)
-├── qos_relay.py                 核心机中转 (gNB 本机直跑时转发到前端)
-├── udp_probe.py                 UDP 端点探针 (auto 模式判定用)
-└── REPORTING.md                 指标上报方案文档
+ranreporter/                     基站模拟与前端联调 (Python)
+├── mock_ran.py                  模拟 gNB: 收 QoS 下发 + 空口状态机 + 自报前端
+└── mock_frontend.py             前端接收端 mock (联调用, 带 sendrate/gbr 实时双曲线图)
 ```
 
 `target_backup_20260803-200912/` 是旧 Target 快照，不是当前运行入口。
 `ref/` 被顶层仓库忽略，可能包含本地 free6gc 实验代码，不属于本仓库发布内容。
 
-### RANReporter 指标采集器
+### mock-ran 与前端联调
 
-`ranreporter/collector.py` 负责把基站实时空口指标上报给前端展示:
+`ranreporter/mock_frontend.py` 是前端契约的本地实现（`POST /api/v1/qos` 校验 + `GET /` 实时双曲线图 + `GET /samples` 拉环形缓冲），用于不起真前端时验证 mock-ran 自报：
 
-| 指标 | 来源 | 说明 |
-| --- | --- | --- |
-| `sendrate_kbps` | 基站 duapp0 odi tracebuff | RLC 字节 tag Δcount × 末次字节 / 真实墙钟 Δt |
-| `q_lvl` (5QI) | QoSModule 日志活跃下发优先 | 基站 L2 trace 不暴露专载 5QI=2，用下发真值兜底 |
-| `gbr_kbps` | QoSModule 日志活跃下发的 GFBR | 基站 AMBR "第二槽"是推断假值不可信，用下发真值 |
-| `timestamp` | `time.time()*1000` | 毫秒级 epoch |
-
-采集器在 `restart-all.sh` step 10 启动，启动与否与 QoS 模式关联（见下节）。
+```bash
+python3 ranreporter/mock_frontend.py --port 28555
+python3 ranreporter/mock_ran.py --port 18099 --frontend-url http://127.0.0.1:28555/api/v1/qos
+# 另开一个终端触发一次下发, 浏览器打开 http://127.0.0.1:28555/ 看梯形曲线
+curl -X POST -H 'Content-Type: application/json' \
+  -d '{"request_id":"t1","rnti":1,"q_lvl":3,"q_gbr_ul":5459,"burst_info":{"ul_burst_duration":8000}}' \
+  http://127.0.0.1:18099/api/v1/qos/update
+```
 
 ## 当前文档
 
@@ -122,7 +109,6 @@ ranreporter/                     基站实时指标采集器 (Python)
 | [NGAP 下发改造方案](NGAP下发改造方案.md) | 当前下发路径、真实验证结果和待接入项 |
 | [方案 A：SMF 外挂实现与验证](方案A-SMF外挂-实现与验证.md) | 已跑通的 SMF、PFCP、N1N2、NGAP 和 DRB 证据 |
 | [基站侧随路 QoS 需求](基站侧随路QoS需求文档.md) | 当前基站通过标准 NGAP 接入时的职责和验收要求 |
-| [RANReporter 指标上报](ranreporter/REPORTING.md) | 基站实时指标(sendrate/gbr/q_lvl)采集与上报方案、已知局限 |
 | [Target README](target/target/README.md) | UDP 协议、运行参数和 Mock 联调方法 |
 | [adaptive-qos README](adaptiveqos/README.md) | 共享策略模块及适配器边界 |
 

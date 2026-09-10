@@ -64,7 +64,7 @@ func main() {
 	flag.UintVar(&arpPriority, "arp-priority", 3, "ARP priority level")
 	flag.UintVar(&arpPreemptCap, "arp-preempt-cap", 1, "ARP pre-emption capability (1=may preempt)")
 	flag.UintVar(&arpPreemptVuln, "arp-preempt-vuln", 0, "ARP pre-emption vulnerability (1=preemptable)")
-	flag.StringVar(&ranUDPEndpoint, "ran-udp-endpoint", "", "gNB UDP QoS endpoint (for ran-udp mode), e.g. 10.88.120.212:54003")
+	flag.StringVar(&ranUDPEndpoint, "ran-udp-endpoint", "", "gNB UDP QoS endpoint (for ran-udp mode), e.g. 10.88.0.3:9999")
 	flag.BoolVar(&ranUDPAck, "ran-udp-ack", false, "whether the gNB UDP interface returns a reply")
 	flag.Parse()
 
