@@ -86,7 +86,6 @@ ranreporter/                     基站模拟与前端联调 (Python)
 ```
 
 `target_backup_20260803-200912/` 是旧 Target 快照，不是当前运行入口。
-`ref/` 被顶层仓库忽略，可能包含本地 free6gc 实验代码，不属于本仓库发布内容。
 
 ### mock-ran 与前端联调
 
@@ -106,13 +105,10 @@ curl -X POST -H 'Content-Type: application/json' \
 | 文档 | 用途 |
 | --- | --- |
 | [随路 QoS 设计文档](随路Qos设计文档.md) | MASQUE 请求、策略计算和 gNB HTTP 协议参考；HTTP 章节只适用于支持该接口的 gNB |
-| [NGAP 下发改造方案](NGAP下发改造方案.md) | 当前下发路径、真实验证结果和待接入项 |
-| [方案 A：SMF 外挂实现与验证](方案A-SMF外挂-实现与验证.md) | 已跑通的 SMF、PFCP、N1N2、NGAP 和 DRB 证据 |
-| [基站侧随路 QoS 需求](基站侧随路QoS需求文档.md) | 当前基站通过标准 NGAP 接入时的职责和验收要求 |
 | [Target README](target/target/README.md) | UDP 协议、运行参数和 Mock 联调方法 |
 | [adaptive-qos README](adaptiveqos/README.md) | 共享策略模块及适配器边界 |
 
-历史方案和失败实验统一位于 [docs/archive](docs/archive/README.md)，不能作为当前部署依据。
+历史方案、失败实验和已废弃路径（方案 A SMF 外挂、基站侧 NGAP 需求等）统一位于 [docs/archive](docs/archive/README.md)，不能作为当前部署依据。
 
 ## 快速验证
 
@@ -132,7 +128,6 @@ go test ./...
 
 ## 下一步
 
-1. 统一 Enforcer 返回值为 MASQUE 侧的 `request_id/status/error_code/message`，不要原样透传不同下游协议。
-2. 补充 QoS Flow 释放接口（当前 SMF `/qos-update` 只 add 不 release）和 N1 NAS QoS Rule，再进行用户面拥塞下的 UL/DL GBR 验证。
-3. 为 `smfenforcer` 补充独立单元测试和 Mock SMF 联调。
-4. 为 RouterEnforcer 增加独立的 `smf` 模式名，避免 `ngap` 在历史文档中既指 AF/PCF 又指 SMF 造成的歧义（当前 `ngap` 已统一指向 SMF 方案 A）。
+1. 决定 `smfenforcer` 与 `routerenforcer` 的 `ngap`/`auto` 模式去留：方案 A 已废弃、部署脚本不再提供 `ngap` 入口，但代码和测试仍在仓库中保留，应明确删除或标注 `Deprecated`。
+2. 清理死代码：`target_backup_20260803-200912/`（与在用 `target/target/` 同名模块 `masque-target` 的旧快照）、`target/target/cmd/mockpcf`（方案 B 遗留，无测试）、`logs/*.bak` 历史日志。
+3. 原计划「统一 Enforcer 返回值为 `request_id/status/error_code/message`」已由 `adaptiveqos.ApplyResult` 完成（见 `model.go`），不再单列。

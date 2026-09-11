@@ -2,7 +2,7 @@
 
 > 文档状态：部分实施，2026-08-11 根据代码复核。本文的 MASQUE 请求和 BurstPolicy 计算规则仍与当前代码一致；`POST /api/v1/qos/update`、RNTI、MASK、MCS/RB/BLER 等章节只描述可编程 gNB HTTP 适配器，不适用于当前封闭厂商基站。
 >
-> 当前仓库已实现 SMF 外挂路径（方案 A）：`smfenforcer`（`adaptiveqos/smfenforcer/`）调用 fork SMF `/nsmf-oam/v1/qos-update` 经 AMF 发送标准 NGAP，已端到端验证到 gNB 建 DRB，并接入 `-core-mode ngap/auto`（`-smf-endpoint`）。原 AF/PCF 路径（方案 B）因 free5GC PCF/SMF 链路阻塞已删除。详情见《NGAP 下发改造方案》和《方案 A：SMF 外挂实现与验证》。
+> 仓库曾实现 SMF 外挂路径（方案 A）：`smfenforcer`（`adaptiveqos/smfenforcer/`）调用 fork SMF `/nsmf-oam/v1/qos-update` 经 AMF 发送标准 NGAP。该路径已端到端验证到 gNB 建 DRB，但**方案 A 现已废弃**，部署脚本不再提供 `ngap` 入口（见根 [README](README.md) 状态表），`smfenforcer` 代码与测试仅保留供追溯。原 AF/PCF 路径（方案 B）因 free5GC PCF/SMF 链路阻塞已删除。方案 A 的设计与验证记录已归档至 `docs/archive/`（《NGAP 下发改造方案》《方案 A：SMF 外挂实现与验证》）。
 >
 > 当前方案不会通过 GTP-U 自定义扩展头向基站传输 QoS JSON。
 

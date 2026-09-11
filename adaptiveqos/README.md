@@ -8,12 +8,13 @@
 | --- | --- | --- |
 | 根包 | BurstPolicy、Processor 和统一模型 | 已实现并有测试 |
 | `masqueapi` | MASQUE JSON 请求转换为 `Intent` | 已实现并有测试 |
-| `ranapi` | 将 `Decision` 转为 `POST /api/v1/qos/update` | 已实现并有测试 |
-| `smfenforcer` | 构造 SMF OAM 请求（方案 A）并调用 fork SMF `/nsmf-oam/v1/qos-update` | 已实现并端到端验证到 gNB 建 DRB；暂无独立单元测试 |
-| `routerenforcer` | 按 `ran/ngap/auto` 选择 Enforcer | 已实现，暂无独立测试 |
+| `ranapi` | 将 `Decision` 转为 `POST /api/v1/qos/update`（gNB HTTP） | 已实现并有测试 |
+| `udpranenforcer` | 将 `Decision` 经 UDP 下发给 gNB | 已实现并有测试；当前默认部署路径 |
+| `smfenforcer` | 构造 SMF OAM 请求（方案 A）并调用 fork SMF `/nsmf-oam/v1/qos-update` | 已实现并有测试；**方案 A 已废弃**，代码保留供追溯 |
+| `routerenforcer` | 按 `ran`/`ran-udp`/`ngap`/`auto` 选择 Enforcer | 已实现并有测试；`ngap`/`auto` 随方案 A 退役 |
 
-`routerenforcer` 的 `ngap` 模式实际选择 SMF OAM Enforcer（方案 A），Target 本身不会直接发送 NGAP。NGAP 最终由 AMF 发给 gNB。
+`routerenforcer` 的 `ngap` 模式实际选择 SMF OAM Enforcer（方案 A），Target 本身不会直接发送 NGAP。NGAP 最终由 AMF 发给 gNB。方案 A 现已废弃，部署脚本不再提供 `ngap` 入口，但 `ngap`/`auto` 模式与 `smfenforcer` 代码仍在仓库中保留供追溯。
 
-本模块的 `smfenforcer` 调用 fork SMF `/nsmf-oam/v1/qos-update`，已端到端验证可触发 PFCP、N1N2、NGAP 并建立 DRB。原 AF/PCF 路径（`afenforcer`）因 free5GC PCF/SMF 链路 panic/重复 URR 问题已删除，由方案 A 取代。
+本模块的 `smfenforcer` 曾调用 fork SMF `/nsmf-oam/v1/qos-update` 端到端验证到 gNB 建 DRB（PFCP、N1N2、NGAP）。原 AF/PCF 路径（`afenforcer`）因 free5GC PCF/SMF 链路 panic/重复 URR 问题已删除，由方案 A 取代；方案 A 现亦废弃。当前部署仅用 `ran`/`ran-udp` 两种模式。
 
 新项目应在边缘完成协议转换，并通过新增 `LimitsProvider` 或 `Enforcer` 适配不同资源模型和下发接口，避免把外部 JSON/HTTP 字段放入核心策略。

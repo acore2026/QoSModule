@@ -166,9 +166,10 @@ Priority = 3
 
 | `-core-mode` | 实际 Enforcer | 状态 |
 | --- | --- | --- |
-| `ran` | `ranapi.Client` | 默认；调用 gNB HTTP API |
-| `ngap` | `smfenforcer.Enforcer` | 调用 fork SMF `/nsmf-oam/v1/qos-update`（方案 A），不是 Target 直接发送 NGAP |
-| `auto` | 先 RAN，再 UDP RAN，失败后 SMF OAM | 只有返回 `ACCEPTED` 才停止回退 |
+| `ran` | `ranapi.Client` | 调用 gNB HTTP API；`mock-ran` 部署模式在二进制层面即 `-core-mode ran`（仅 `-ran-url` 指向本地 mock） |
+| `ran-udp` | `udpranenforcer` | 调用 gNB UDP；`ran-udp` 部署模式，当前默认部署路径 |
+| `ngap` | `smfenforcer.Enforcer` | 调用 fork SMF `/nsmf-oam/v1/qos-update`（方案 A），不是 Target 直接发送 NGAP。**方案 A 已废弃**，部署脚本不再提供 `ngap` 入口 |
+| `auto` | 先 UDP RAN，再 mock-ran HTTP，失败后 SMF OAM | 三档回退；**已退役**，会让远程基站与 mock-ran 两个上报源同时活着，前端无法区分 |
 
 ### 5.2 gNB HTTP 模式
 
@@ -197,6 +198,8 @@ go run ./cmd/target \
 `-ran-mask auto` 会根据实际序列化字段自动置位。UL-only 请求不会设置 DL 字段对应的 bit。
 
 ### 5.3 SMF OAM 模式（方案 A）
+
+> **已废弃。** 方案 A 的 SMF 外挂路径已退役，部署脚本不再提供 `ngap` 入口。下述命令与字段仅保留供追溯，不代表当前部署路径。详见根 [README](../../README.md) 状态表与 `docs/archive/`。
 
 ```bash
 go run ./cmd/target \

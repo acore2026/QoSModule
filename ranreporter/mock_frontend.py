@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 VALID_KEYS = {"timestamp", "sendrate_kbps", "gbr_kbps", "q_lvl"}
 SAMPLES = deque(maxlen=600)  # ~5 分钟 @0.5s
-SEEN_TS = set()  # 已存入 SAMPLES 的 timestamp, 用于去重(collector 每次推整窗会重叠)
+SEEN_TS = set()  # 已存入 SAMPLES 的 timestamp, 用于去重(mock-ran 每次推整窗会重叠)
 
 DEFAULT_PORT = 28448
 
@@ -47,7 +47,7 @@ function draw(s){
   ctx.clearRect(0,0,cv.width,cv.height);
   if(!s.length){hud.textContent='(暂无样本)';return;}
   s.sort((a,b)=>a.timestamp-b.timestamp);
-  // X 轴锚定最后一个样本的时间戳(不是 Date.now()): burst 结束后 collector 进入
+  // X 轴锚定最后一个样本的时间戳(不是 Date.now()): burst 结束后 mock-ran 进入
   // tail(继续推 8s 填满右侧)再冻结, last_ts 停在 burst 后 8s, 图表随之冻结。
   // 窗口 24s(=8s burst 的三倍): burst 跑完整窗口再冻, 前后各 8s 留白/恢复段, burst 居中。
   const last_ts=s[s.length-1].timestamp;
@@ -128,7 +128,7 @@ class H(BaseHTTPRequestHandler):
                 if not isinstance(m[k], (int, float)):
                     self._err(400, "metrics[%d] %s not numeric" % (i, k))
                     return
-        # 按 timestamp 去重存入环形缓冲: collector 每次推整个滑动窗口(30条),
+        # 按 timestamp 去重存入环形缓冲: mock-ran 每次推整个滑动窗口(30条),
         # 相邻推送窗口重叠, 若不去重会导致同时刻样本被重复写入, 曲线错乱。
         new_n = 0
         for m in metrics:
