@@ -152,13 +152,15 @@ server.go
 策略公式：
 
 ```text
-MBR = burst_size_kB * 8000 / burst_duration_ms
-GBR = burst_size_kB * 8000 / transit_delay_ms
+MBR = burst_size_kB * 8000 / e2e_delay_ms
+GBR = burst_size_kB * 8000 / burst_duration_ms
 PDB = e2e_delay_ms * 0.625
 Priority = 3
 ```
 
-速率向上取整，PDB 四舍五入，然后按 `Limits` 裁剪。
+速率向上取整，PDB 四舍五入，然后按 `Limits` 裁剪。裁剪前后都会强制 `MBR >= GBR`（3GPP 约束）：当 `burst_duration < e2e_delay` 时 GBR 会超过 MBR，此时把 MBR 抬到 GBR。
+
+transit delay（`ul_transit_delay`/`dl_transit_delay`）按「显式值 > `e2e_delay × 0.8` > 默认 100ms」推导，仅存入 `Decision.Calculation` 供日志追溯，**不参与 MBR/GBR 计算**（见 `adaptiveqos/policy_test.go` 的 `TestBurstPolicyGBRIgnoresTransitDelay`）。
 
 ## 5. 下发模式
 

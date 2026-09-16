@@ -12,11 +12,11 @@
 2、以计算的MBR、GBR、PDB作为目标结果，按RAN接口范围裁剪后下发，用高优先级（3）。
 3、gNB HTTP模式不查询现有QoS、不做PFCP modify，直接向RAN下发；UPF查询作为未来保留项。
 4、QoS模块通过MASQUE Proxy向UE回送RAN下发结果。
-5、计算GBR时，比例按照真实的传输时延比例修改；真实传输时延来源暂作为保留项。
+5、GBR 按 `burst_size / burst_duration` 计算；真实传输时延（transit delay）按「显式值 > e2e_delay × 0.8 > 默认 100ms」推导后仅记入计算明细供日志追溯，不参与 MBR/GBR 计算，其来源暂作为保留项。
 
 ## 主要功能
 
-QoS模块主要负责接收QoS协同请求的MASQUE消息，将携带突发参数的请求转换为QoS诉求并生成策略。gNB HTTP模式通过RAN API下发；核心网模式由Enforcer调用PCF，未来将接入已经验证的SMF接口。策略计算不查询UPF现有QoS，UPF查询能力作为未来扩展保留项。
+QoS模块主要负责接收QoS协同请求的MASQUE消息，将携带突发参数的请求转换为QoS诉求并生成策略。当前部署通过 gNB UDP Enforcer（`ran-udp`）或 gNB HTTP Enforcer（`ran`，mock-ran 模式）直接下发到基站；原核心网外挂路径中 AF/PCF（方案 B）已删除，SMF 外挂（方案 A）曾实现并端到端验证但现已废弃，两者代码仅保留供追溯。策略计算不查询UPF现有QoS，UPF查询能力作为未来扩展保留项。
 
 ### gNB HTTP模式组网拓扑图
 
@@ -147,7 +147,7 @@ sequenceDiagram
 | max_frame_size | integer | 最大帧长(单位: bytes) | 可选 |
 | resolution | string | 分辨率(e.g., 1920x1080) | 可选 |
 | code_rate | integer | 码率(单位: kbps) | 可选 |
-| e2e_delay | integer | 端到端真实时延(E2E delay)，单位ms，用于PDB和真实传输时延推导 | 必选 |
+| e2e_delay | integer | 端到端真实时延(E2E delay)，单位ms，作为 MBR 的分母，并用于 PDB 计算和真实传输时延推导 | 必选 |
 | service_experience | object | 业务体验QoE，如MOS | 可选 |
 | mos_score | float | MOS评分 | 可选 |
 | other_metrics | object | 其他体验指标 | 可选 |
@@ -280,11 +280,11 @@ flowchart TD
     C -->|完整| H[计算目标QoS参数]
 
     H --> I[计算MBR]
-    I --> I1[/burst_size × 8 × 1000 / burst_duration/]
+    I --> I1[/burst_size × 8 × 1000 / e2e_delay/]
     I1 --> I2[计算结果]
 
     H --> J[计算GBR]
-    J --> J1[/burst_size × 8 × 1000 / 真实传输时延/]
+    J --> J1[/burst_size × 8 × 1000 / burst_duration/]
     J1 --> J2[计算结果]
 
     H --> K[计算PDB]
@@ -335,14 +335,15 @@ flowchart TD
     subgraph 参数计算
         A[dl_burst_size: 2048 KB] --> M1[/× 8/]
         M1 --> M2[/× 1000/]
-        M2 --> M3[/÷ 100 ms/]
-        M3 --> MBR[MBR = 163840 kbps]
+        M2 --> M3[/÷ e2e_delay 160 ms/]
+        M3 --> MBR0[原始MBR = 102400 kbps]
+        MBR0 --> MBR[因GBR大于MBR抬到GBR: MBR = 163840 kbps]
 
         A --> G1[/× 8/]
         G1 --> G2[/× 1000/]
-        G2 --> G3[/÷ 真实传输时延128 ms/]
-        G3 --> GBR[目标GBR = 128000 kbps]
-        GBR --> GBR2[下发GBR = 100000 kbps]
+        G2 --> G3[/÷ dl_burst_duration 100 ms/]
+        G3 --> GBR[目标GBR = 163840 kbps]
+        GBR --> GBR2[下发GBR = 100000 kbps 裁剪后]
 
         G[e2e_delay: 160 ms] --> P1[/× 0.625/]
         P1 --> PDB[PDB = 100 ms]
@@ -361,7 +362,7 @@ flowchart TD
     end
 
     subgraph GBR
-        B1[目标GBR: 128 Mbps] --> G2[按接口范围裁剪]
+        B1[目标GBR: 163.84 Mbps] --> G2[按接口范围裁剪]
         G2 --> G3[下发GBR = 100 Mbps]
     end
 
@@ -380,17 +381,17 @@ flowchart TD
     PR2 --> OUT
 ```
 
-MBR、GBR、PDB均采用“先计算目标值，再按RAN接口字段范围裁剪，最后下发”的规则。当前RAN接口中GBR上限为100000 kbps，因此示例中的128000 kbps需要裁剪为100000 kbps后下发。
+MBR、GBR、PDB均采用“先计算目标值，再按RAN接口字段范围裁剪，最后下发”的规则。当前RAN接口中GBR上限为100000 kbps，因此示例中的目标GBR 163840 kbps需要裁剪为100000 kbps后下发。裁剪前后均会强制 MBR >= GBR（3GPP 约束），故示例中原始MBR 102400 kbps 被抬到 163840 kbps。
 
 ### MBR计算
 
-MBR按方向分别计算：`mbr_ul = ul_burst_size × 8 × 1000 / ul_burst_duration`。当请求同时携带`dl_burst_size`和`dl_burst_duration`时，计算`mbr_dl = dl_burst_size × 8 × 1000 / dl_burst_duration`；当两个DL字段同时缺失时，不计算也不下发DL MBR。UL Burst字段必须存在且大于0；DL字段如携带则必须成对存在且大于0，否则返回`INVALID_PARAM`，不使用默认MBR。计算结果按RAN接口范围裁剪后下发。
+MBR按方向分别计算：`mbr_ul = ul_burst_size × 8 × 1000 / e2e_delay`。当请求同时携带`dl_burst_size`和`dl_burst_duration`时，计算`mbr_dl = dl_burst_size × 8 × 1000 / e2e_delay`；当两个DL字段同时缺失时，不计算也不下发DL MBR。UL Burst字段和`service_info.e2e_delay`必须存在且大于0；DL字段如携带则必须成对存在且大于0，否则返回`INVALID_PARAM`，不使用默认MBR。计算结果按RAN接口范围裁剪后下发。因3GPP要求 MBR >= GBR，当`burst_duration < e2e_delay`导致GBR超过MBR时把MBR抬到GBR，裁剪后再复查一次该约束。
 
 ```mermaid
 flowchart TD
-A[计算MBR] --> B{burst_size和burst_duration均大于0?}
+A[计算MBR] --> B{burst_size、burst_duration和e2e_delay均大于0?}
 B -->|否| Z[返回INVALID_PARAM]
-B -->|是| E[/MBR = burst_size × 8 × 1000 / burst_duration/]
+B -->|是| E[/MBR = burst_size × 8 × 1000 / e2e_delay/]
 E --> F[结果单位: kbps]
 F --> G{MBR > 上限?}
 G -->|是| H[MBR = 配置上限]
@@ -404,16 +405,13 @@ K --> L
 
 ### GBR计算
 
-GBR按方向分别计算：`gbr_ul = ul_burst_size × 8 × 1000 / 上行真实传输时延`。当请求同时携带`dl_burst_size`和`dl_burst_duration`时，计算`gbr_dl = dl_burst_size × 8 × 1000 / 下行真实传输时延`；当两个DL字段同时缺失时，不计算也不下发DL GBR。UL Burst字段和`service_info.e2e_delay`必须存在且大于0；DL字段如携带则必须成对存在且大于0，否则返回`INVALID_PARAM`，不使用默认GBR。真实传输时延未携带不属于Burst字段缺失，仍按E2E比例推导。计算结果按RAN接口范围裁剪后下发。
+GBR按方向分别计算：`gbr_ul = ul_burst_size × 8 × 1000 / ul_burst_duration`。当请求同时携带`dl_burst_size`和`dl_burst_duration`时，计算`gbr_dl = dl_burst_size × 8 × 1000 / dl_burst_duration`；当两个DL字段同时缺失时，不计算也不下发DL GBR。UL Burst字段必须存在且大于0；DL字段如携带则必须成对存在且大于0，否则返回`INVALID_PARAM`，不使用默认GBR。计算结果按RAN接口范围裁剪后下发。
 
 ```mermaid
 flowchart TD
-A[计算GBR] --> B{burst_size > 0?}
+A[计算GBR] --> B{burst_size和burst_duration均大于0?}
 B -->|否| Z[返回INVALID_PARAM]
-B -->|是| D{请求携带真实传输时延?}
-D -->|否| T[按E2E比例或配置默认时延推导]
-D -->|是| E[/GBR = burst_size × 8 × 1000 / 真实传输时延/]
-T --> E
+B -->|是| E[/GBR = burst_size × 8 × 1000 / burst_duration/]
 E --> F[结果单位: kbps]
 F --> G{GBR > 上限?}
 G -->|是| H[GBR = 配置上限]
@@ -425,7 +423,7 @@ J --> L
 K --> L
 ```
 
-真实传输时延暂作为保留/可配置输入。当前规则为：优先使用请求中携带的真实传输时延；如请求未携带，则使用配置的默认比例或默认值推导。具体字段名称和默认比例可随后续协议调整。
+真实传输时延（transit delay）按「请求携带的显式值 > `e2e_delay × 0.8`（比例可配）> 默认 100ms」推导，结果仅写入 `Decision.Calculation` 供日志与追溯，**不参与 MBR/GBR/PDB 计算**（`adaptiveqos/policy_test.go` 的 `TestBurstPolicyGBRIgnoresTransitDelay` 明确断言这一点）。具体字段名称和默认比例可随后续协议调整。
 
 ### PDB计算
 
@@ -488,9 +486,9 @@ end
 rect rgb(255, 248, 240)
 Note over Engine: 步骤2: 参数计算
 Engine->>Engine: 计算MBR
-Note over Engine: 2048 × 8 × 1000 / 100<br/>= 163840 kbps
+Note over Engine: 2048 × 8 × 1000 / 160 (e2e_delay)<br/>= 102400 → 抬到GBR = 163840 kbps
 Engine->>Engine: 计算GBR
-Note over Engine: 2048 × 8 × 1000 / 真实传输时延<br/>= 128000 kbps
+Note over Engine: 2048 × 8 × 1000 / 100 (burst_duration)<br/>= 163840 → 裁剪 = 100000 kbps
 Engine->>Engine: 计算PDB
 Note over Engine: 160 × 0.625<br/>= 100 ms
 Engine->>Engine: 确定优先级

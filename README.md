@@ -24,7 +24,7 @@ QoSModule 接收 MASQUE Proxy 转发的 UDP QoS 请求，将业务突发需求�
 - `ran-udp`：UDP 直连远程基站（默认 `10.88.0.3:9999`），下发后由**远程基站自己上报前端**。
 - `mock-ran`：HTTP 直连本地 mock-ran（`127.0.0.1:18081`），下发后由 **mock-ran 自己上报前端**。
 
-Go 侧 `routerenforcer` 仍保留 `ran`/`ngap`/`auto` 三种 Mode（`router_test.go` 有 7 个 auto 测试覆盖），但部署脚本不再提供入口：
+Go 侧 `routerenforcer` 仍保留 `ran`/`ran-udp`/`ngap`/`auto` 四种 Mode（`router_test.go` 有 7 个 auto 测试覆盖），其中只有 `ran-udp` 是当前生产模式，其余三种已退役且部署脚本不再提供入口：
 
 | 已退役模式 | 退役原因 |
 | --- | --- |

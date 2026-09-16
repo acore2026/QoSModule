@@ -13,8 +13,9 @@ import (
 )
 
 // Enforcer pushes QoS to a gNB over UDP, using the same JSON payload as
-// ranapi.Client (HTTP). It is the third RouterEnforcer path (mode "ran-udp")
-// for gNBs that expose a UDP QoS interface instead of HTTP.
+// ranapi.Client (HTTP). It backs the "ran-udp" RouterEnforcer mode, which is
+// the current production path, for gNBs that expose a UDP QoS interface
+// instead of HTTP.
 type Enforcer struct {
 	endpoint   string
 	timeout    time.Duration
