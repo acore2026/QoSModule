@@ -30,8 +30,10 @@ set -e
 # ---- 公共(所有模式) ----
 QOS_BIND="${QOS_BIND:-0.0.0.0:7400}"           # QoS 模块 UDP 监听(收 MASQUE 请求)
 
-# ---- mode=ran-udp(UDP 直连远程基站) ----
-RAN_UDP_ENDPOINT="${RAN_UDP_ENDPOINT:-10.88.0.3:9999}"  # 远程基站 UDP 地址
+# ---- mode=ran-udp(UDP 直连真实基站) ----
+# 原远端 10.88.0.3:9999 已搬至本机同段 10.88.120.212, 端口/协议不变(UDP:9999)。
+# 临时切回旧远端: RAN_UDP_ENDPOINT=10.88.0.3:9999 ./start-qos.sh ran-udp
+RAN_UDP_ENDPOINT="${RAN_UDP_ENDPOINT:-10.88.120.212:9999}"  # 真实基站 UDP 地址
 RAN_UDP_ACK="${RAN_UDP_ACK:-1}"                          # 基站是否回应答(0=不等,1=等)
 
 # ---- mock-ran(本地模拟 gNB) ----
@@ -125,7 +127,7 @@ usage() {
   echo "  mock-ran:     $MOCK_RAN_URL (端口 $MOCK_RAN_PORT)"
   echo "  前端上报:     $FRONTEND_URL (仅 mock-ran 模式用)"
   echo ""
-  echo "已退役: mode=ran(默认目标 10.88.120.212 已下线)、mode=auto(三档回退会导致"
+  echo "已退役: mode=ran(HTTP, 默认 10.88.120.212:80 已下线; ran-udp 用同 IP 的 :9999 UDP)、mode=auto(三档回退会导致"
   echo "        远程基站与 mock-ran 两个上报源同时活着, 前端 schema 无源标识无法区分)、"
   echo "        mode=ngap/SMF、中间采集器 collector.py。"
   echo ""

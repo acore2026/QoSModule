@@ -11,7 +11,7 @@ QoSModule 接收 MASQUE Proxy 转发的 UDP QoS 请求，将业务突发需求�
 | MASQUE UDP Target | 已实现 | 解析 `CLIENT-IP`，支持可靠信封、去重缓存和原路回包 |
 | QoS 请求校验与策略计算 | 已实现 | UL 必选、DL 成对可选，按静态范围裁剪 |
 | gNB HTTP 下发 | 已实现 | `ranapi.Client` 调用 `POST /api/v1/qos/update`，当前部署指向本地 mock-ran |
-| gNB UDP 下发 | 已实现 | `udpranenforcer` 调用远程基站 `10.88.0.3:9999`，可选等 ack |
+| gNB UDP 下发 | 已实现 | `udpranenforcer` 调用真实基站 `10.88.120.212:9999`，可选等 ack |
 | mock-ran 自报前端 | 已实现 | `ranreporter/mock_ran.py` 内置 pusher 线程，模拟空口状态机并直接 POST 前端 |
 | SMF 外挂下发（方案 A） | 已实现但已废弃 | `smfenforcer` 代码与测试保留，部署脚本不再提供 `ngap` 入口 |
 | AF/PCF 下发（方案 B） | 已移除 | 原 `afenforcer` 因 free5GC PCF/SMF 链路 panic/重复 URR 不通，已删除，由方案 A 取代 |
@@ -21,7 +21,7 @@ QoSModule 接收 MASQUE Proxy 转发的 UDP QoS 请求，将业务突发需求�
 
 当前**部署脚本**（`scripts/start-qos.sh`、`/home/core/restart-all.sh`）只暴露两种模式，二选一：
 
-- `ran-udp`：UDP 直连远程基站（默认 `10.88.0.3:9999`），下发后由**远程基站自己上报前端**。
+- `ran-udp`：UDP 直连真实基站（默认 `10.88.120.212:9999`，原远端 `10.88.0.3` 已搬本地），下发后由**真实基站自己上报前端**。
 - `mock-ran`：HTTP 直连本地 mock-ran（`127.0.0.1:18081`），下发后由 **mock-ran 自己上报前端**。
 
 Go 侧 `routerenforcer` 仍保留 `ran`/`ran-udp`/`ngap`/`auto` 四种 Mode（`router_test.go` 有 7 个 auto 测试覆盖），其中只有 `ran-udp` 是当前生产模式，其余三种已退役且部署脚本不再提供入口：
@@ -38,7 +38,7 @@ Go 侧 `routerenforcer` 仍保留 `ran`/`ran-udp`/`ngap`/`auto` 四种 Mode（`r
 
 | 模式 | 下发 | 上报 |
 | --- | --- | --- |
-| `ran-udp` | QoSModule → UDP `10.88.0.3:9999` | 远程基站自己 POST 前端 |
+| `ran-udp` | QoSModule → UDP `10.88.120.212:9999` | 真实基站自己 POST 前端 |
 | `mock-ran` | QoSModule → HTTP `127.0.0.1:18081/api/v1/qos/update` | mock-ran 进程自己 POST 前端 |
 
 前端契约（`POST {FRONTEND_URL}`，默认 `http://192.168.1.10:28448/api/v1/qos`）：
