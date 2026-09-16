@@ -25,7 +25,7 @@ type QoSConfig struct {
 	HTTPClient  *http.Client
 	Logger      *log.Logger
 
-	// CoreMode routes enforcement: "ran" → gNB-HTTP, "ran-udp" → gNB-UDP, "ngap" → SMF OAM, "auto" → ran/ran-udp/smf in order.
+	// CoreMode routes enforcement: "ran" → gNB-HTTP, "ran-udp" → gNB-UDP, "ngap" → SMF OAM, "auto" → ran-udp/ran/smf in order (UDP → mock-ran → SMF).
 	CoreMode string
 	// SMFConfig configures the SMF OAM enforcer (方案 A) used when CoreMode is ngap/auto.
 	SMFConfig smfenforcer.Config
